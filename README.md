@@ -41,7 +41,7 @@ SECRET_KEY=your_secret_key_here
 ```bash
 python main.py
 ```
-Visit: `http://localhost:8000/docs` for interactive API documentation.
+Visit: `http://localhost:8080/docs` for interactive API documentation.
 
 ## 📚 API Endpoints
 
@@ -80,18 +80,18 @@ Visit: `http://localhost:8000/docs` for interactive API documentation.
 ### Basic Flow
 ```bash
 # 1. Create session
-curl -X POST "http://localhost:8000/initiate-session" 
+curl -X POST "http://localhost:8080/initiate-session" 
      -H "Content-Type: application/json" 
      -d '{"username": "emma"}'
 
 # 2. Send message
-curl -X POST "http://localhost:8000/query" 
+curl -X POST "http://localhost:8080/query" 
      -H "Authorization: Bearer <SESSION_ID>" 
      -H "Content-Type: application/json" 
      -d '{"message": "Tell me about dinosaurs!"}'
 
 # 3. Add custom educational prompt
-curl -X POST "http://localhost:8000/session/add-prompt" 
+curl -X POST "http://localhost:8080/session/add-prompt" 
      -H "Authorization: Bearer <SESSION_ID>" 
      -H "Content-Type: application/json" 
      -d '{"additional_prompt": "Act like a friendly science teacher"}'
@@ -194,7 +194,7 @@ SECRET_KEY=your_secret_key_here
 python main.py
 ```
 
-Visit `http://localhost:8000/docs` for interactive API documentation.
+Visit `http://localhost:8080/docs` for interactive API documentation.
 
 ## 📚 API Reference
 
@@ -363,24 +363,24 @@ fetch('/session/prompt-info', {
 ### cURL Examples
 ```bash
 # Create session
-curl -X POST "http://localhost:8000/initiate-session" 
+curl -X POST "http://localhost:8080/initiate-session" 
      -H "Content-Type: application/json" 
      -d '{"username": "sarah"}'
 
 # Send message
-curl -X POST "http://localhost:8000/query" 
+curl -X POST "http://localhost:8080/query" 
      -H "Authorization: Bearer <SESSION_ID>" 
      -H "Content-Type: application/json" 
      -d '{"message": "Tell me about dinosaurs!"}'
 
 # Add custom prompt
-curl -X POST "http://localhost:8000/session/add-prompt" 
+curl -X POST "http://localhost:8080/session/add-prompt" 
      -H "Authorization: Bearer <SESSION_ID>" 
      -H "Content-Type: application/json" 
      -d '{"additional_prompt": "Please act like a friendly math tutor"}'
 
 # Test content filtering (will be blocked)
-curl -X POST "http://localhost:8000/query" 
+curl -X POST "http://localhost:8080/query" 
      -H "Authorization: Bearer <SESSION_ID>" 
      -H "Content-Type: application/json" 
      -d '{"message": "I hate math"}'

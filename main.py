@@ -438,4 +438,4 @@ async def get_session_prompt_info(session_id: str = Depends(validate_session)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8080)
