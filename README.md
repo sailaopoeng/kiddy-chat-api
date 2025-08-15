@@ -4,10 +4,10 @@ A safe and fun FastAPI-based chat application designed specifically for kids! Th
 
 ## ✨ Features
 
-### 🛡️ Kid-Safety Features
+### 🛡️ Safety Features
 - **Content Filtering**: Automatically detects and blocks inappropriate language
 - **Age-Appropriate Responses**: System prompts ensure kid-friendly interactions  
-- **Safe AI Model**: Uses GPT-4o-mini with reduced temperature for consistent, safe responses
+- **Safe AI Model**: Uses GPT-4o-mini with reduced temperature for consistent responses
 - **Dual-Layer Protection**: Input and output filtering for maximum safety
 
 ### 🎨 Interactive Features
@@ -16,12 +16,164 @@ A safe and fun FastAPI-based chat application designed specifically for kids! Th
 - **Educational Focus**: Encourages learning, creativity, and positive values
 - **Custom Session Prompts**: Frontend can add educational context while maintaining safety
 
-### 🚀 Core API Features
-- **Session Management**: Create and manage chat sessions with unique session IDs
-- **Authentication**: Bearer token authentication using session IDs
-- **Chat History**: Maintain conversation context within sessions
-- **RESTful API**: Clean and well-documented endpoints
-- **Filter Transparency**: API endpoints to view current filters and prompts
+### 🚀 Core Features
+- **Session Management**: Secure sessions with unique IDs
+- **Authentication**: Bearer token authentication
+- **Chat History**: Maintain conversation context
+- **RESTful API**: Clean, documented endpoints
+- **Filter Transparency**: View current filters and prompts
+
+## 🚀 Quick Start
+
+### 1. Installation
+```bash
+pip install -r requirements.txt
+```
+
+### 2. Environment Setup
+Create a `.env` file:
+```env
+OPENAI_API_KEY=your_openai_api_key_here
+SECRET_KEY=your_secret_key_here
+```
+
+### 3. Run Application
+```bash
+python main.py
+```
+Visit: `http://localhost:8000/docs` for interactive API documentation.
+
+## 📚 API Endpoints
+
+### Basic Operations
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/` | Health check and welcome message |
+| POST | `/initiate-session` | Create new chat session |
+| POST | `/query` | Send message (requires auth) |
+| GET | `/session/{id}/history` | Get chat history (requires auth) |
+| DELETE | `/session` | End session (requires auth) |
+
+### Helper Endpoints
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/conversation-starters` | Get fun conversation topics |
+| GET | `/filter-info` | Get current filters and prompts |
+
+### Advanced Features
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| POST | `/session/add-prompt` | Add custom session prompt (requires auth) |
+| GET | `/session/prompt-info` | Get session prompt details (requires auth) |
+
+## 🎯 Authentication
+
+1. Create session: `POST /initiate-session` → get `session_id`
+2. Use as Bearer token: `Authorization: Bearer <session_id>`
+3. Without valid session: returns 401 Unauthorized
+
+## 💻 Usage Examples
+
+### Basic Flow
+```bash
+# 1. Create session
+curl -X POST "http://localhost:8000/initiate-session" 
+     -H "Content-Type: application/json" 
+     -d '{"username": "emma"}'
+
+# 2. Send message
+curl -X POST "http://localhost:8000/query" 
+     -H "Authorization: Bearer <SESSION_ID>" 
+     -H "Content-Type: application/json" 
+     -d '{"message": "Tell me about dinosaurs!"}'
+
+# 3. Add custom educational prompt
+curl -X POST "http://localhost:8000/session/add-prompt" 
+     -H "Authorization: Bearer <SESSION_ID>" 
+     -H "Content-Type: application/json" 
+     -d '{"additional_prompt": "Act like a friendly science teacher"}'
+```
+
+### Frontend Integration
+```javascript
+// Create session
+const response = await fetch('/initiate-session', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ username: 'emma' })
+});
+const { session_id } = await response.json();
+
+// Send message
+const chatResponse = await fetch('/query', {
+  method: 'POST',
+  headers: {
+    'Authorization': `Bearer ${session_id}`,
+    'Content-Type': 'application/json'
+  },
+  body: JSON.stringify({ message: 'What is gravity?' })
+});
+```
+
+## 🛡️ Safety System
+
+### Content Filtering
+Automatically blocks:
+- ❌ Inappropriate language and words
+- ❌ Violent or scary content  
+- ❌ Adult topics
+- ❌ Negative or harmful speech patterns
+
+### Safety Response
+When inappropriate content is detected:
+1. 🚫 Block content from reaching AI
+2. 💬 Respond with gentle, educational message
+3. 🔄 Redirect to positive topics
+4. 📝 Log for monitoring
+
+### AI Configuration
+- **Model**: GPT-4o-mini
+- **Temperature**: 0.5 (consistent responses)
+- **Max Tokens**: 300 (appropriate length)
+- **Moderation**: Dual-layer filtering
+
+### Custom Prompts
+- ✅ **Additive Only**: Never replaces safety prompts
+- ✅ **Session Scoped**: Per-session customization
+- ✅ **Safety Preserved**: All filtering remains active
+- ✅ **Educational**: Perfect for tutoring contexts
+
+## 📁 Project Structure
+
+```
+gpt-for-kids-backend/
+├── main.py              # FastAPI application
+├── requirements.txt     # Dependencies  
+├── .env                # Environment variables
+├── Dockerfile          # Container config
+└── README.md           # Documentation
+```
+
+## 🔧 Error Handling
+
+| Status Code | Description |
+|-------------|-------------|
+| 400 | Invalid input (empty username/message) |
+| 401 | Invalid or missing session ID |
+| 500 | OpenAI API or server errors |
+
+## 🔒 Security
+
+- **Sessions**: In-memory storage, 24-hour expiration
+- **API Keys**: Secure storage, never commit to version control
+- **Production**: Consider Redis, rate limiting, HTTPS, secret management
+
+## 📄 License
+
+MIT License
 
 ## 🚀 Quick Start
 
@@ -122,7 +274,7 @@ Authorization: Bearer <session_id>
 **GET** `/filter-info`
 ```json
 {
-    "inappropriate_words": ["stupid", "idiot", "hate", "kill", "..."],
+    "Additive Only": ["stupid", "idiot", "hate", "kill", "..."],
     "inappropriate_patterns": ["\b(i hate|you suck|go away|shut up)\b", "..."],
     "kids_friendly_responses": [
         "I can't help with that kind of talk. Let's use kind words instead! 😊"
@@ -234,508 +386,6 @@ curl -X POST "http://localhost:8000/query"
      -d '{"message": "I hate math"}'
 # Response: Kid-friendly redirection message
 ```
-
-## 🛡️ Safety System
-
-### Content Filtering
-The API automatically filters:
-- ❌ Inappropriate language and words
-- ❌ Violent or scary content  
-- ❌ Adult topics
-- ❌ Negative or harmful speech patterns
-
-### Safety Response Strategy
-When inappropriate content is detected:
-1. 🚫 Block content from reaching OpenAI
-2. 💬 Respond with gentle, educational message
-3. 🔄 Redirect to positive conversation topics
-4. 📝 Log interaction for monitoring (if needed)
-
-### AI Configuration
-- **Model**: GPT-4o-mini (OpenAI's latest efficient model)
-- **Temperature**: 0.5 (consistent, predictable responses)
-- **Max Tokens**: 300 (appropriate response length for kids)
-- **Content Moderation**: Dual-layer filtering (input + output)
-
-### Custom Session Prompts
-- ✅ **Additive Only**: Appended to default safety prompt, never replacing it
-- ✅ **Session Scoped**: Each session can have different additional instructions
-- ✅ **Safety Preserved**: All content filtering remains active
-- ✅ **Educational Use**: Perfect for math tutoring, science teaching, creative writing
-
-## 📁 Project Structure
-
-```
-gpt-for-kids-backend/
-├── main.py              # Main FastAPI application
-├── requirements.txt     # Python dependencies  
-├── .env                # Environment variables (create this)
-├── Dockerfile          # Docker container configuration
-└── README.md           # This documentation
-```
-
-## 🔧 Error Handling
-
-- **400 Bad Request**: Invalid input (empty username/message)
-- **401 Unauthorized**: Invalid or missing session ID  
-- **500 Internal Server Error**: OpenAI API errors
-
-## 🔒 Security Notes
-
-- **Session Management**: Sessions stored in memory, expire after 24 hours
-- **API Key Security**: Keep OpenAI API key secure, never commit to version control
-- **Production TODO**: Redis/database storage, rate limiting, HTTPS/TLS, secret management
-
-## 📄 License
-
-MIT License
-
-### Using cURL
-
-```bash
-# Get filter and prompt information
-curl -X GET "http://localhost:8000/filter-info"
-
-# Create a session
-curl -X POST "http://localhost:8000/initiate-session" \
-     -H "Content-Type: application/json" \
-     -d '{"username": "sarah"}'
-
-# Add custom session prompt
-curl -X POST "http://localhost:8000/session/add-prompt" \
-     -H "Authorization: Bearer <SESSION_ID>" \
-     -H "Content-Type: application/json" \
-     -d '{"additional_prompt": "Please act like a friendly math tutor who uses fun examples"}'
-
-# Get session prompt info
-curl -X GET "http://localhost:8000/session/prompt-info" \
-     -H "Authorization: Bearer <SESSION_ID>"
-
-# Send a message with custom prompt active
-curl -X POST "http://localhost:8000/query" \
-     -H "Authorization: Bearer <SESSION_ID>" \
-     -H "Content-Type: application/json" \
-     -d '{"message": "How do fractions work?"}'
-
-# Test that filtering still works
-curl -X POST "http://localhost:8000/query" \
-     -H "Authorization: Bearer <SESSION_ID>" \
-     -H "Content-Type: application/json" \
-     -d '{"message": "I hate math"}'
-# Response: Kid-friendly redirection message
-```s inappropriate language
-- **👶 Age-Appropriate Responses**: System prompts ensure kid-friendly interactions
-- **🎨 Fun Interface**: Emojis and encouraging language throughout
-- **🎯 Conversation Starters**: Built-in suggestions for fun topics
-- **🤖 Safe AI Model**: Uses GPT-4o-mini with reduced temperature for consistent, safe responses
-- **📚 Educational Focus**: Encourages learning, creativity, and positive values
-
-## 🚀 Core Features
-
-- **Session Management**: Create and manage chat sessions with unique session IDs
-- **Authentication**: Bearer token authentication using session IDs
-- **OpenAI Integration**: Powered by GPT-4o-mini for intelligent, kid-safe responses
-- **Chat History**: Maintain conversation context within sessions
-- **RESTful API**: Clean and well-documented API endpoints
-
-## Setup
-
-### 1. Environment Setup
-
-Make sure you have Python 3.8+ installed, then install dependencies:
-
-```bash
-pip install -r requirements.txt
-```
-
-### 2. Environment Variables
-
-Create a `.env` file in the project root and add your OpenAI API key:
-
-```env
-OPENAI_API_KEY=your_openai_api_key_here
-SECRET_KEY=your_secret_key_here
-```
-
-**Important**: Replace `your_openai_api_key_here` with your actual OpenAI API key from https://platform.openai.com/api-keys
-
-### 3. Running the Application
-
-Start the FastAPI server:
-
-```bash
-python main.py
-```
-
-Or using uvicorn directly:
-
-```bash
-uvicorn main:app --host 0.0.0.0 --port 8000 --reload
-```
-
-The API will be available at: `http://localhost:8000`
-
-### 4. API Documentation
-
-Once running, visit these URLs for interactive API documentation:
-- Swagger UI: `http://localhost:8000/docs`
-- ReDoc: `http://localhost:8000/redoc`
-
-## 📚 API Endpoints
-
-### 1. Welcome Message
-**GET** `/`
-
-Get a kid-friendly welcome message and API status.
-
-**Response:**
-```json
-{
-    "message": "Welcome to Kiddy Chat API! 🌟 A safe and fun place to chat with AI! 🤖",
-    "status": "Ready for awesome conversations!",
-    "version": "1.0.0"
-}
-```
-
-### 2. Initiate Session
-**POST** `/initiate-session`
-
-Create a new chat session for a young user.
-
-**Request Body:**
-```json
-{
-    "username": "emma"
-}
-```
-
-**Response:**
-```json
-{
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "message": "Session created successfully for emma",
-    "username": "emma"
-}
-```
-
-### 3. Query (Kid-Safe Chat)
-**POST** `/query`
-
-Send a message and get a kid-friendly response with content filtering.
-
-**Headers:**
-```
-Authorization: Bearer <session_id>
-```
-
-**Request Body:**
-```json
-{
-    "message": "What's your favorite animal?"
-}
-```
-
-**Response:**
-```json
-{
-    "response": "I love learning about all animals! 🐾 Dolphins are really cool because they're super smart and friendly. They can recognize themselves in mirrors and love to play! What about you - do you have a favorite animal? I'd love to hear about it! 😊",
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "username": "emma"
-}
-```
-
-**Content Filtering Example:**
-If inappropriate content is detected, you'll get a gentle response like:
-```json
-{
-    "response": "I can't help with that kind of talk. Let's use kind words instead! 😊",
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "username": "emma"
-}
-```
-
-### 4. Conversation Starters
-**GET** `/conversation-starters`
-
-Get fun, kid-appropriate conversation topics.
-
-**Response:**
-```json
-{
-    "conversation_starters": [
-        "What's your favorite animal and why? 🐾",
-        "If you could have any superpower, what would it be? 🦸‍♂️",
-        "What's the coolest thing you learned today? 📚",
-        "If you could visit any planet, which one would you choose? 🚀",
-        "What's your favorite color and what does it remind you of? 🌈"
-    ],
-    "message": "Here are some fun things we can chat about! 🌟"
-}
-```
-
-### 5. Get Session History
-### 5. Get Session History
-**GET** `/session/{session_id}/history`
-
-Retrieve chat history for a session.
-
-**Headers:**
-```
-Authorization: Bearer <session_id>
-```
-
-**Response:**
-```json
-{
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "username": "emma",
-    "created_at": "2024-01-15T10:30:00",
-    "messages": [
-        {
-            "role": "system",
-            "content": "You are a helpful, friendly, and safe AI assistant designed specifically for children..."
-        },
-        {
-            "role": "user",
-            "content": "What's your favorite animal?"
-        },
-        {
-            "role": "assistant",
-            "content": "I love learning about all animals! 🐾 Dolphins are really cool..."
-        }
-    ]
-}
-```
-
-### 6. End Session
-**DELETE** `/session`
-
-End a chat session and clean up resources.
-
-**Headers:**
-```
-Authorization: Bearer <session_id>
-```
-
-**Response:**
-```json
-{
-    "message": "Session ended successfully for emma",
-    "session_id": "550e8400-e29b-41d4-a716-446655440000"
-}
-```
-
-### 7. Get Filter & Prompt Information
-**GET** `/filter-info`
-
-Retrieve current content filters, patterns, and system prompts for frontend display.
-
-**Response:**
-```json
-{
-    "inappropriate_words": ["stupid", "idiot", "hate", "kill", "..."],
-    "inappropriate_patterns": ["\\b(i hate|you suck|go away|shut up)\\b", "..."],
-    "kids_friendly_responses": [
-        "I can't help with that kind of talk. Let's use kind words instead! 😊",
-        "Oops! That's not very nice language. How about we talk about something fun instead?",
-        "..."
-    ],
-    "default_system_prompt": "You are a helpful, friendly, and safe AI assistant designed specifically for children..."
-}
-```
-
-### 8. Add Custom Session Prompt
-**POST** `/session/add-prompt`
-
-Add additional instructions to the current session (appends to default prompt without overriding safety features).
-
-**Headers:**
-```
-Authorization: Bearer <session_id>
-```
-
-**Request Body:**
-```json
-{
-    "additional_prompt": "Please respond like a friendly science teacher who loves to explain things with simple experiments."
-}
-```
-
-**Response:**
-```json
-{
-    "message": "Additional prompt added successfully! This will guide our conversation while keeping all safety features active.",
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "additional_prompt": "Please respond like a friendly science teacher who loves to explain things with simple experiments."
-}
-```
-
-### 9. Get Session Prompt Information
-**GET** `/session/prompt-info`
-
-Get detailed information about the current session's prompts and configuration.
-
-**Headers:**
-```
-Authorization: Bearer <session_id>
-```
-
-**Response:**
-```json
-{
-    "session_id": "550e8400-e29b-41d4-a716-446655440000",
-    "username": "emma",
-    "default_system_prompt": "You are a helpful, friendly, and safe AI assistant...",
-    "additional_prompt": "Please respond like a friendly science teacher...",
-    "combined_system_message": "You are a helpful, friendly, and safe AI assistant designed specifically for children...\n\nAdditional instructions for this session: Please respond like a friendly science teacher...",
-    "created_at": "2024-01-15T10:30:00"
-}
-```
-
-## 🛡️ Content Safety Features
-
-### Inappropriate Content Filtering
-
-The API automatically filters out:
-- ❌ Inappropriate language and words
-- ❌ Violent or scary content  
-- ❌ Adult topics
-- ❌ Negative or harmful speech patterns
-
-### Kid-Friendly System Prompts
-
-Every conversation starts with a comprehensive system prompt that ensures the AI:
-- ✅ Uses simple, age-appropriate language
-- ✅ Stays positive and encouraging
-- ✅ Focuses on education and creativity
-- ✅ Promotes kindness and good values
-- ✅ Redirects inappropriate topics to fun alternatives
-
-### Safe AI Configuration
-
-- **Model**: GPT-4o-mini (OpenAI's efficient model)
-- **Temperature**: 0.5 (lower for more consistent, predictable responses)
-- **Max Tokens**: 300 (appropriate response length for kids)
-- **Content Moderation**: Dual-layer filtering (input + output)
-
-## 🎯 Authentication
-
-The API uses Bearer token authentication:
-
-1. **Create a session** using `/initiate-session` with a username
-2. **Use the returned session_id** as a Bearer token in subsequent requests
-3. **Include the token** in the Authorization header: `Authorization: Bearer <session_id>`
-
-**Without a valid session ID, the `/query` endpoint will return 401 Unauthorized.**
-
-
-### Using cURL
-
-```bash
-# 1. Create a session
-curl -X POST "http://localhost:8000/initiate-session" \
-     -H "Content-Type: application/json" \
-     -d '{"username": "sarah"}'
-
-# Response: {"session_id": "abc123...", ...}
-
-# 2. Send a kid-friendly message (replace <SESSION_ID> with actual session ID)
-curl -X POST "http://localhost:8000/query" \
-     -H "Authorization: Bearer <SESSION_ID>" \
-     -H "Content-Type: application/json" \
-     -d '{"message": "Tell me about dinosaurs!"}'
-
-# 3. Try inappropriate content (will be filtered)
-curl -X POST "http://localhost:8000/query" \
-     -H "Authorization: Bearer <SESSION_ID>" \
-     -H "Content-Type: application/json" \
-     -d '{"message": "I hate school"}'
-# Response: Kid-friendly redirection message
-
-# 4. Get chat history
-curl -X GET "http://localhost:8000/session/<SESSION_ID>/history" \
-     -H "Authorization: Bearer <SESSION_ID>"
-
-# 5. End session
-curl -X DELETE "http://localhost:8000/session" \
-     -H "Authorization: Bearer <SESSION_ID>"
-```
-
-## 📁 Project Structure
-
-```
-gpt-for-kids-backend/
-├── main.py                 # Main FastAPI application with kid-safety features
-├── requirements.txt        # Python dependencies
-├── .env                   # Environment variables (create this)
-├── Dockerfile             # Docker container configuration
-└── README.md              # This documentation
-```
-
-## 🔧 Advanced Features
-
-### Custom Session Prompts
-
-**Purpose**: Allow frontend applications to customize AI behavior for specific educational contexts while maintaining all safety features.
-
-**Key Features**:
-- ✅ **Additive Only**: Custom prompts are appended to the default safety prompt, never replacing it
-- ✅ **Session Scoped**: Each session can have its own additional instructions
-- ✅ **Safety Preserved**: All content filtering and kid-safety features remain active
-- ✅ **Frontend Integration**: Easy API endpoints for dynamic prompt management
-
-**Example Use Cases**:
-- 📚 "Act like a friendly math tutor"
-- 🔬 "Focus on science experiments and fun facts"
-- 🎨 "Help with creative writing and storytelling"
-- 🌍 "Discuss geography and different cultures"
-
-### Filter Information API
-
-**Purpose**: Provide transparency to frontend developers about what content is filtered and how the system works.
-
-**Available Information**:
-- 🚫 **Filtered Words**: List of inappropriate words that are blocked
-- 🔍 **Filter Patterns**: Regex patterns used to detect problematic content
-- 💬 **Alternative Responses**: Kid-friendly responses used when content is filtered
-- 📝 **System Prompts**: The base safety prompt used for all sessions
-
-**Frontend Integration Benefits**:
-- Help developers understand the safety system
-- Enable dynamic UI updates based on current filters
-- Assist in creating complementary frontend validation
-- Support educational content about appropriate language
-
-## 🔧 Content Filtering Details
-
-### Blocked Words and Patterns
-The system monitors for:
-- Basic inappropriate words
-- Negative speech patterns  
-- Violence-related content
-- Adult topics
-- Bullying language
-
-### Response Strategy
-When inappropriate content is detected:
-1. 🚫 Block the content from reaching OpenAI
-2. 💬 Respond with a gentle, educational message
-3. 🔄 Redirect to positive conversation topics
-4. 📝 Still log the interaction for monitoring (if needed)
-
-### Customizable Filtering
-You can easily modify the content filters in `main.py`:
-- `INAPPROPRIATE_WORDS` list
-- `INAPPROPRIATE_PATTERNS` regex patterns  
-- `KIDS_FRIENDLY_RESPONSES` alternative responses
-
-## Error Handling
-
-The API includes comprehensive error handling:
-
-- **400 Bad Request**: Invalid input (empty username/message)
-- **401 Unauthorized**: Invalid or missing session ID
-- **500 Internal Server Error**: OpenAI API errors or server issues
 
 ## Security Notes
 
