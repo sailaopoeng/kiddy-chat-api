@@ -1,0 +1,18 @@
+version: 1.0
+runtime: docker
+build:
+  commands:
+    build:
+      - echo "Build started on `date`"
+      - echo "Building Docker image..."
+run:
+  runtime-version: latest
+  command: gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8080
+  network:
+    port: 8080
+    env: PORT
+  env:
+    - name: PORT
+      value: "8080"
+    - name: PYTHONPATH
+      value: "/app"

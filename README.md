@@ -43,6 +43,13 @@ python main.py
 ```
 Visit: `http://localhost:8080/docs` for interactive API documentation.
 
+### 4. AWS App Runner Deployment
+For AWS App Runner deployment, the app is already configured with:
+- Docker support (Dockerfile included)
+- Python 3.11 compatibility
+- Production-ready Gunicorn server
+- Health checks for AWS App Runner
+
 ## 📚 API Endpoints
 
 ### Basic Operations
@@ -387,7 +394,46 @@ curl -X POST "http://localhost:8080/query"
 # Response: Kid-friendly redirection message
 ```
 
-## Security Notes
+## 🚀 AWS App Runner Deployment
+
+This application is optimized for AWS App Runner deployment:
+
+### Prerequisites
+- AWS CLI configured
+- Docker installed locally (for testing)
+- OpenAI API key
+
+### Deployment Steps
+1. **Push to GitHub**: Ensure your code is in a GitHub repository
+2. **Create App Runner Service**:
+   - Go to AWS App Runner console
+   - Create new service from GitHub repository
+   - Select this repository
+   - Use the included `apprunner.yaml` configuration
+3. **Environment Variables**: Set in App Runner console:
+   - `OPENAI_API_KEY`: Your OpenAI API key
+   - `SECRET_KEY`: A secure random string
+
+### AWS App Runner Features
+- ✅ **Python 3.11 Compatible**: Optimized for AWS App Runner Python runtime
+- ✅ **Auto Scaling**: Handles traffic spikes automatically
+- ✅ **Health Checks**: Built-in health monitoring
+- ✅ **HTTPS**: Automatic SSL certificate management
+- ✅ **Container Support**: Uses optimized Docker container
+
+### Local Testing with Docker
+```bash
+# Build the image
+docker build -t kiddy-chat-api .
+
+# Run locally (same as AWS App Runner)
+docker run -p 8080:8080 \
+  -e OPENAI_API_KEY=your_key \
+  -e SECRET_KEY=your_secret \
+  kiddy-chat-api
+```
+
+## 🔒 Security Notes
 
 1. **Session Management**: Sessions are stored in memory and expire after 24 hours
 2. **API Key Security**: Keep your OpenAI API key secure and never commit it to version control
