@@ -1,18 +1,12 @@
 version: 1.0
-runtime: docker
+runtime: python3
 build:
   commands:
     build:
-      - echo "Build started on `date`"
-      - echo "Building Docker image..."
+      - pip install -r requirements.txt
 run:
-  runtime-version: latest
+  runtime-version: 3.9
   command: gunicorn main:app -w 4 -k uvicorn.workers.UvicornWorker --bind 0.0.0.0:8080
   network:
     port: 8080
     env: PORT
-  env:
-    - name: PORT
-      value: "8080"
-    - name: PYTHONPATH
-      value: "/app"

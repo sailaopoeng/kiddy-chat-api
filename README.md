@@ -46,7 +46,7 @@ Visit: `http://localhost:8080/docs` for interactive API documentation.
 ### 4. AWS App Runner Deployment
 For AWS App Runner deployment, the app is already configured with:
 - Docker support (Dockerfile included)
-- Python 3.11 compatibility
+- Python 3.9 compatibility
 - Production-ready Gunicorn server
 - Health checks for AWS App Runner
 
@@ -415,7 +415,7 @@ This application is optimized for AWS App Runner deployment:
    - `SECRET_KEY`: A secure random string
 
 ### AWS App Runner Features
-- **Python 3.11 Compatible**: Optimized for AWS App Runner Python runtime
+- **Python 3.9 Compatible**: Optimized for AWS App Runner Python runtime
 - **Auto Scaling**: Handles traffic spikes automatically
 - **Health Checks**: Built-in health monitoring
 - **HTTPS**: Automatic SSL certificate management
