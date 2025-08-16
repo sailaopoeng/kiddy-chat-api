@@ -1,29 +1,29 @@
-# Kiddy Chat API 🌟
+# Kiddy Chat API
 
 A safe and fun FastAPI-based chat application designed specifically for kids! This app integrates with OpenAI's GPT-4o-mini model and includes comprehensive content filtering to ensure age-appropriate conversations.
 
-## ✨ Features
+## Features
 
-### 🛡️ Safety Features
+### Safety Features
 - **Content Filtering**: Automatically detects and blocks inappropriate language
 - **Age-Appropriate Responses**: System prompts ensure kid-friendly interactions  
 - **Safe AI Model**: Uses GPT-4o-mini with reduced temperature for consistent responses
 - **Dual-Layer Protection**: Input and output filtering for maximum safety
 
-### 🎨 Interactive Features
+### Interactive Features
 - **Fun Interface**: Emojis and encouraging language throughout
 - **Conversation Starters**: Built-in suggestions for fun topics
 - **Educational Focus**: Encourages learning, creativity, and positive values
 - **Custom Session Prompts**: Frontend can add educational context while maintaining safety
 
-### 🚀 Core Features
+### Core Features
 - **Session Management**: Secure sessions with unique IDs
 - **Authentication**: Bearer token authentication
 - **Chat History**: Maintain conversation context
 - **RESTful API**: Clean, documented endpoints
 - **Filter Transparency**: View current filters and prompts
 
-## 🚀 Quick Start
+## Quick Start
 
 ### 1. Installation
 ```bash
@@ -50,7 +50,7 @@ For AWS App Runner deployment, the app is already configured with:
 - Production-ready Gunicorn server
 - Health checks for AWS App Runner
 
-## 📚 API Endpoints
+## API Endpoints
 
 ### Basic Operations
 
@@ -76,13 +76,13 @@ For AWS App Runner deployment, the app is already configured with:
 | POST | `/session/add-prompt` | Add custom session prompt (requires auth) |
 | GET | `/session/prompt-info` | Get session prompt details (requires auth) |
 
-## 🎯 Authentication
+## Authentication
 
 1. Create session: `POST /initiate-session` → get `session_id`
 2. Use as Bearer token: `Authorization: Bearer <session_id>`
 3. Without valid session: returns 401 Unauthorized
 
-## 💻 Usage Examples
+## Usage Examples
 
 ### Basic Flow
 ```bash
@@ -125,21 +125,21 @@ const chatResponse = await fetch('/query', {
 });
 ```
 
-## 🛡️ Safety System
+## Safety System
 
 ### Content Filtering
 Automatically blocks:
-- ❌ Inappropriate language and words
-- ❌ Violent or scary content  
-- ❌ Adult topics
-- ❌ Negative or harmful speech patterns
+- Inappropriate language and words
+- Violent or scary content  
+- Adult topics
+- Negative or harmful speech patterns
 
 ### Safety Response
 When inappropriate content is detected:
-1. 🚫 Block content from reaching AI
-2. 💬 Respond with gentle, educational message
-3. 🔄 Redirect to positive topics
-4. 📝 Log for monitoring
+1. Block content from reaching AI
+2. Respond with gentle, educational message
+3. Redirect to positive topics
+4. Log for monitoring
 
 ### AI Configuration
 - **Model**: GPT-4o-mini
@@ -148,12 +148,12 @@ When inappropriate content is detected:
 - **Moderation**: Dual-layer filtering
 
 ### Custom Prompts
-- ✅ **Additive Only**: Never replaces safety prompts
-- ✅ **Session Scoped**: Per-session customization
-- ✅ **Safety Preserved**: All filtering remains active
-- ✅ **Educational**: Perfect for tutoring contexts
+- **Additive Only**: Never replaces safety prompts
+- **Session Scoped**: Per-session customization
+- **Safety Preserved**: All filtering remains active
+- **Educational**: Perfect for tutoring contexts
 
-## 📁 Project Structure
+## Project Structure
 
 ```
 gpt-for-kids-backend/
@@ -172,13 +172,13 @@ gpt-for-kids-backend/
 | 401 | Invalid or missing session ID |
 | 500 | OpenAI API or server errors |
 
-## 🔒 Security
+## Security
 
 - **Sessions**: In-memory storage, 24-hour expiration
 - **API Keys**: Secure storage, never commit to version control
 - **Production**: Consider Redis, rate limiting, HTTPS, secret management
 
-## 📄 License
+## License
 
 MIT License
 
@@ -394,7 +394,7 @@ curl -X POST "http://localhost:8080/query"
 # Response: Kid-friendly redirection message
 ```
 
-## 🚀 AWS App Runner Deployment
+## AWS App Runner Deployment
 
 This application is optimized for AWS App Runner deployment:
 
@@ -415,11 +415,11 @@ This application is optimized for AWS App Runner deployment:
    - `SECRET_KEY`: A secure random string
 
 ### AWS App Runner Features
-- ✅ **Python 3.11 Compatible**: Optimized for AWS App Runner Python runtime
-- ✅ **Auto Scaling**: Handles traffic spikes automatically
-- ✅ **Health Checks**: Built-in health monitoring
-- ✅ **HTTPS**: Automatic SSL certificate management
-- ✅ **Container Support**: Uses optimized Docker container
+- **Python 3.11 Compatible**: Optimized for AWS App Runner Python runtime
+- **Auto Scaling**: Handles traffic spikes automatically
+- **Health Checks**: Built-in health monitoring
+- **HTTPS**: Automatic SSL certificate management
+- **Container Support**: Uses optimized Docker container
 
 ### Local Testing with Docker
 ```bash
@@ -433,7 +433,7 @@ docker run -p 8080:8080 \
   kiddy-chat-api
 ```
 
-## 🔒 Security Notes
+## Security Notes
 
 1. **Session Management**: Sessions are stored in memory and expire after 24 hours
 2. **API Key Security**: Keep your OpenAI API key secure and never commit it to version control
