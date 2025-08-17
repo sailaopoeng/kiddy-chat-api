@@ -20,9 +20,31 @@ app = FastAPI(
     description="A safe and fun AI chat API designed specifically for kids! 🌟"
 )
 
-# Initialize OpenAI client
-client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-if not client.api_key:
+# Initialize OpenAI client with logging
+api_key = os.getenv("OPENAI_API_KEY")
+print(f"🔍 Checking OPENAI_API_KEY...")
+if api_key:
+    print(f"✅ OPENAI_API_KEY found (length: {len(api_key)} characters)")
+    print(f"🔑 Key starts with: {api_key[:7]}..." if len(api_key) > 7 else "🔑 Key too short")
+    if api_key.startswith("sk-"):
+        print("✅ API key has correct format (starts with 'sk-')")
+    else:
+        print("⚠️  Warning: API key doesn't start with 'sk-' - might be invalid")
+else:
+    print("❌ OPENAI_API_KEY not found in environment variables!")
+    print("🔍 Available environment variables:")
+    for key in sorted(os.environ.keys()):
+        if 'OPENAI' in key.upper() or 'API' in key.upper() or 'KEY' in key.upper():
+            print(f"   - {key}")
+
+try:
+    client = openai.OpenAI(api_key=api_key)
+    print("✅ OpenAI client initialized successfully")
+except Exception as e:
+    print(f"❌ Failed to initialize OpenAI client: {e}")
+    client = None
+
+if not api_key:
     raise ValueError("OPENAI_API_KEY not found in environment variables")
 
 # Security
@@ -186,7 +208,9 @@ async def root():
     return {
         "message": "Welcome to Kiddy Chat API! 🌟 A safe and fun place to chat with AI! 🤖",
         "status": "Ready for awesome conversations!",
-        "version": "1.0.0"
+        "version": "1.0.0",
+        "openai_api_key_status": "configured" if api_key else "missing",
+        "openai_client_status": "initialized" if client else "failed"
     }
 
 @app.post("/initiate-session", response_model=InitiateSessionResponse)
@@ -370,6 +394,31 @@ async def get_conversation_starters():
         "conversation_starters": selected_starters,
         "message": "Here are some fun things we can chat about! 🌟"
     }
+
+@app.get("/debug/env-check")
+async def debug_environment():
+    """
+    Debug endpoint to check environment variable status
+    """
+    current_api_key = os.getenv("OPENAI_API_KEY")
+    
+    env_info = {
+        "openai_api_key_present": bool(current_api_key),
+        "openai_api_key_length": len(current_api_key) if current_api_key else 0,
+        "openai_api_key_format_valid": current_api_key.startswith("sk-") if current_api_key else False,
+        "openai_client_initialized": client is not None,
+        "port": os.getenv("PORT", "not_set"),
+        "python_path": os.getenv("PYTHONPATH", "not_set"),
+        "environment_variables_with_key_or_api": [
+            key for key in os.environ.keys() 
+            if any(word in key.upper() for word in ['OPENAI', 'API', 'KEY'])
+        ]
+    }
+    
+    if current_api_key:
+        env_info["openai_api_key_preview"] = f"{current_api_key[:7]}..." if len(current_api_key) > 7 else "too_short"
+    
+    return env_info
 
 @app.get("/filter-info", response_model=FilterInfoResponse)
 async def get_filter_info():
