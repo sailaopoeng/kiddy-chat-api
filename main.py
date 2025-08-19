@@ -1,6 +1,8 @@
 import os
 import uuid
 import re
+import logging
+import sys
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 
@@ -9,6 +11,25 @@ from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
 import openai
+
+# Configure logging for AWS App Runner
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(sys.stdout)  # Ensure logs go to stdout for AWS App Runner
+    ],
+    force=True  # Override any existing logging configuration
+)
+
+# Ensure stdout is unbuffered for immediate log visibility in AWS App Runner
+sys.stdout.reconfigure(line_buffering=True)
+
+# Create logger for this module
+logger = logging.getLogger(__name__)
+
+# Set environment variable to ensure Python stdout is unbuffered
+os.environ['PYTHONUNBUFFERED'] = '1'
 
 # Load environment variables
 load_dotenv()
@@ -20,28 +41,41 @@ app = FastAPI(
     description="A safe and fun AI chat API designed specifically for kids! 🌟"
 )
 
+@app.on_event("startup")
+async def startup_event():
+    """Log application startup information"""
+    logger.info("🚀 Kiddy Chat API is starting up!")
+    logger.info(f"📊 OpenAI client status: {'✅ Ready' if client else '❌ Failed'}")
+    logger.info(f"🔐 API key status: {'✅ Configured' if api_key else '❌ Missing'}")
+    logger.info("🌟 Ready to serve safe and fun conversations for kids!")
+
+@app.on_event("shutdown")
+async def shutdown_event():
+    """Log application shutdown"""
+    logger.info("👋 Kiddy Chat API is shutting down. Goodbye!")
+
 # Initialize OpenAI client with logging
 api_key = os.getenv("OPENAI_API_KEY")
-print(f"🔍 Checking OPENAI_API_KEY...")
+logger.info("🔍 Checking OPENAI_API_KEY...")
 if api_key:
-    print(f"✅ OPENAI_API_KEY found (length: {len(api_key)} characters)")
-    print(f"🔑 Key starts with: {api_key[:7]}..." if len(api_key) > 7 else "🔑 Key too short")
+    logger.info(f"✅ OPENAI_API_KEY found (length: {len(api_key)} characters)")
+    logger.info(f"🔑 Key starts with: {api_key[:7]}..." if len(api_key) > 7 else "🔑 Key too short")
     if api_key.startswith("sk-"):
-        print("✅ API key has correct format (starts with 'sk-')")
+        logger.info("✅ API key has correct format (starts with 'sk-')")
     else:
-        print("⚠️  Warning: API key doesn't start with 'sk-' - might be invalid")
+        logger.warning("⚠️  Warning: API key doesn't start with 'sk-' - might be invalid")
 else:
-    print("❌ OPENAI_API_KEY not found in environment variables!")
-    print("🔍 Available environment variables:")
+    logger.error("❌ OPENAI_API_KEY not found in environment variables!")
+    logger.info("🔍 Available environment variables:")
     for key in sorted(os.environ.keys()):
         if 'OPENAI' in key.upper() or 'API' in key.upper() or 'KEY' in key.upper():
-            print(f"   - {key}")
+            logger.info(f"   - {key}")
 
 try:
     client = openai.OpenAI(api_key=api_key)
-    print("✅ OpenAI client initialized successfully")
+    logger.info("✅ OpenAI client initialized successfully")
 except Exception as e:
-    print(f"❌ Failed to initialize OpenAI client: {e}")
+    logger.error(f"❌ Failed to initialize OpenAI client: {e}")
     client = None
 
 if not api_key:
@@ -158,8 +192,10 @@ def create_session(username: str, additional_prompt: str = None) -> str:
     base_prompt = get_kids_system_prompt()
     if additional_prompt:
         combined_prompt = f"{base_prompt}\n\nAdditional instructions for this session: {additional_prompt}"
+        logger.info(f"Creating session {session_id[:8]}... for {username} with additional prompt")
     else:
         combined_prompt = base_prompt
+        logger.info(f"Creating session {session_id[:8]}... for {username} with default prompt")
     
     sessions[session_id] = {
         "username": username,
@@ -173,6 +209,8 @@ def create_session(username: str, additional_prompt: str = None) -> str:
             }
         ]
     }
+    
+    logger.info(f"Session {session_id[:8]}... created successfully. Total active sessions: {len(sessions)}")
     return session_id
 
 def validate_session(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
@@ -180,6 +218,7 @@ def validate_session(credentials: HTTPAuthorizationCredentials = Depends(securit
     session_id = credentials.credentials
     
     if session_id not in sessions:
+        logger.warning(f"Invalid session ID attempted: {session_id[:8]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid session ID"
@@ -187,6 +226,7 @@ def validate_session(credentials: HTTPAuthorizationCredentials = Depends(securit
     
     # Update last activity
     sessions[session_id]["last_activity"] = datetime.now()
+    logger.debug(f"Session validated and activity updated: {session_id[:8]}...")
     
     return session_id
 
@@ -198,8 +238,12 @@ def cleanup_expired_sessions():
         if session_data["last_activity"] < cutoff_time
     ]
     
-    for session_id in expired_sessions:
-        del sessions[session_id]
+    if expired_sessions:
+        logger.info(f"Cleaning up {len(expired_sessions)} expired sessions")
+        for session_id in expired_sessions:
+            del sessions[session_id]
+    
+    logger.debug(f"Session cleanup complete. Active sessions: {len(sessions)}")
 
 # API Endpoints
 @app.get("/")
@@ -218,7 +262,10 @@ async def initiate_session(request: InitiateSessionRequest):
     """
     Create a new chat session for a user
     """
+    logger.info(f"Creating new session for username: {request.username}")
+    
     if not request.username.strip():
+        logger.warning(f"Empty username provided in session creation request")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Username cannot be empty"
@@ -229,6 +276,8 @@ async def initiate_session(request: InitiateSessionRequest):
     
     # Create new session
     session_id = create_session(request.username)
+    
+    logger.info(f"Session {session_id} created successfully for user: {request.username}")
     
     return InitiateSessionResponse(
         session_id=session_id,
@@ -243,6 +292,7 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
     Requires valid session ID in Authorization header as Bearer token
     """
     if not request.message.strip():
+        logger.warning(f"Empty message provided in query request for session: {session_id}")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Message cannot be empty"
@@ -251,8 +301,11 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
     session_data = sessions[session_id]
     username = session_data["username"]
     
+    logger.info(f"Processing query for user {username} (session: {session_id[:8]}...): {request.message[:50]}...")
+    
     # Check for inappropriate content
     if contains_inappropriate_content(request.message):
+        logger.warning(f"Inappropriate content detected from user {username}: {request.message[:30]}...")
         kid_friendly_response = get_kid_friendly_response()
         
         # Still add the user message to history for context, but don't send to OpenAI
@@ -280,6 +333,7 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
     })
     
     try:
+        logger.info(f"Sending request to OpenAI for user {username}")
         # Create OpenAI chat completion with kid-friendly model
         response = client.chat.completions.create(
             model="gpt-4o-mini",
@@ -292,9 +346,11 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
         
         # Extract assistant response
         assistant_message = response.choices[0].message.content
+        logger.info(f"Received response from OpenAI for user {username}: {assistant_message[:50]}...")
         
         # Additional safety check on AI response
         if contains_inappropriate_content(assistant_message):
+            logger.warning(f"Inappropriate content detected in AI response for user {username}")
             assistant_message = "I want to make sure I'm being helpful and appropriate. Let me think of a better way to answer that! What else would you like to know? 😊"
         
         # Add assistant response to session history
@@ -310,6 +366,7 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
         )
         
     except Exception as e:
+        logger.error(f"Error processing OpenAI request for user {username}: {str(e)}")
         # Kid-friendly error message
         error_response = "Oops! I'm having a little trouble right now. Can you try asking me something else? 🤖"
         
@@ -345,6 +402,8 @@ async def end_session(session_id: str = Depends(validate_session)):
     """
     username = sessions[session_id]["username"]
     del sessions[session_id]
+    
+    logger.info(f"Session ended for user {username}. Session ID: {session_id[:8]}... Active sessions: {len(sessions)}")
     
     return {
         "message": f"Session ended successfully for {username}",
@@ -489,4 +548,7 @@ if __name__ == "__main__":
     import uvicorn
     import os
     port = int(os.getenv("PORT", 8080))
+    logger.info(f"🚀 Starting Kiddy Chat API on port {port}")
+    logger.info(f"🌟 API Version: 1.0.0")
+    logger.info(f"🔧 Environment: {'Production' if os.getenv('PORT') else 'Development'}")
     uvicorn.run(app, host="0.0.0.0", port=port)
