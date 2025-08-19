@@ -3,6 +3,7 @@ import uuid
 import re
 import logging
 import sys
+import json
 from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 
@@ -34,6 +35,56 @@ os.environ['PYTHONUNBUFFERED'] = '1'
 # Load environment variables
 load_dotenv()
 
+def parse_openai_api_key(raw_key: str) -> Optional[str]:
+    """
+    Parse OpenAI API key from either text or JSON format
+    AWS Secrets Manager can return either format depending on how it's configured
+    
+    Args:
+        raw_key: The raw API key value from environment variable
+        
+    Returns:
+        The extracted API key string, or None if parsing fails
+    """
+    if not raw_key:
+        return None
+        
+    # Remove any leading/trailing whitespace
+    raw_key = raw_key.strip()
+    
+    # Check if it's already a plain text API key
+    if raw_key.startswith("sk-"):
+        logger.info("🔑 API key detected as plain text format")
+        return raw_key
+    
+    # Try to parse as JSON (AWS Secrets Manager format)
+    try:
+        key_data = json.loads(raw_key)
+        logger.info("🔑 API key detected as JSON format")
+        
+        # Common JSON key names used in AWS Secrets Manager
+        possible_keys = ['OPENAI_API_KEY', 'openai_api_key', 'api_key', 'key', 'apiKey']
+        
+        for key_name in possible_keys:
+            if key_name in key_data:
+                extracted_key = key_data[key_name]
+                if extracted_key and isinstance(extracted_key, str) and extracted_key.startswith("sk-"):
+                    logger.info(f"✅ Successfully extracted API key from JSON field: {key_name}")
+                    return extracted_key
+        
+        # If no standard key found, log available keys for debugging
+        logger.warning(f"⚠️  JSON format detected but no valid API key found. Available keys: {list(key_data.keys())}")
+        return None
+        
+    except json.JSONDecodeError:
+        # Not JSON format, might be some other format
+        logger.warning("⚠️  API key is not in plain text or valid JSON format")
+        logger.warning(f"⚠️  Raw key preview: {raw_key[:20]}..." if len(raw_key) > 20 else f"⚠️  Raw key: {raw_key}")
+        return None
+    except Exception as e:
+        logger.error(f"❌ Unexpected error parsing API key: {e}")
+        return None
+
 # Initialize FastAPI app
 app = FastAPI(
     title="Kiddy Chat API", 
@@ -55,21 +106,30 @@ async def shutdown_event():
     logger.info("👋 Kiddy Chat API is shutting down. Goodbye!")
 
 # Initialize OpenAI client with logging
-api_key = os.getenv("OPENAI_API_KEY")
+raw_api_key = os.getenv("OPENAI_API_KEY")
 logger.info("🔍 Checking OPENAI_API_KEY...")
-if api_key:
-    logger.info(f"✅ OPENAI_API_KEY found (length: {len(api_key)} characters)")
-    logger.info(f"🔑 Key starts with: {api_key[:7]}..." if len(api_key) > 7 else "🔑 Key too short")
-    if api_key.startswith("sk-"):
-        logger.info("✅ API key has correct format (starts with 'sk-')")
+
+if raw_api_key:
+    logger.info(f"✅ OPENAI_API_KEY environment variable found (length: {len(raw_api_key)} characters)")
+    api_key = parse_openai_api_key(raw_api_key)
+    
+    if api_key:
+        logger.info(f"✅ Successfully parsed API key (length: {len(api_key)} characters)")
+        logger.info(f"🔑 Key starts with: {api_key[:7]}..." if len(api_key) > 7 else "🔑 Key too short")
+        if api_key.startswith("sk-"):
+            logger.info("✅ API key has correct format (starts with 'sk-')")
+        else:
+            logger.warning("⚠️  Warning: API key doesn't start with 'sk-' - might be invalid")
     else:
-        logger.warning("⚠️  Warning: API key doesn't start with 'sk-' - might be invalid")
+        logger.error("❌ Failed to parse API key from environment variable")
+        api_key = None
 else:
     logger.error("❌ OPENAI_API_KEY not found in environment variables!")
     logger.info("🔍 Available environment variables:")
     for key in sorted(os.environ.keys()):
         if 'OPENAI' in key.upper() or 'API' in key.upper() or 'KEY' in key.upper():
             logger.info(f"   - {key}")
+    api_key = None
 
 try:
     client = openai.OpenAI(api_key=api_key)
@@ -459,12 +519,15 @@ async def debug_environment():
     """
     Debug endpoint to check environment variable status
     """
-    current_api_key = os.getenv("OPENAI_API_KEY")
+    raw_api_key = os.getenv("OPENAI_API_KEY")
+    parsed_api_key = parse_openai_api_key(raw_api_key) if raw_api_key else None
     
     env_info = {
-        "openai_api_key_present": bool(current_api_key),
-        "openai_api_key_length": len(current_api_key) if current_api_key else 0,
-        "openai_api_key_format_valid": current_api_key.startswith("sk-") if current_api_key else False,
+        "openai_api_key_raw_present": bool(raw_api_key),
+        "openai_api_key_raw_length": len(raw_api_key) if raw_api_key else 0,
+        "openai_api_key_parsed_present": bool(parsed_api_key),
+        "openai_api_key_parsed_length": len(parsed_api_key) if parsed_api_key else 0,
+        "openai_api_key_format_valid": parsed_api_key.startswith("sk-") if parsed_api_key else False,
         "openai_client_initialized": client is not None,
         "port": os.getenv("PORT", "not_set"),
         "python_path": os.getenv("PYTHONPATH", "not_set"),
@@ -474,8 +537,21 @@ async def debug_environment():
         ]
     }
     
-    if current_api_key:
-        env_info["openai_api_key_preview"] = f"{current_api_key[:7]}..." if len(current_api_key) > 7 else "too_short"
+    # Add format detection
+    if raw_api_key:
+        raw_preview = f"{raw_api_key[:20]}..." if len(raw_api_key) > 20 else raw_api_key
+        env_info["openai_api_key_raw_preview"] = raw_preview
+        
+        # Detect format
+        if raw_api_key.strip().startswith("sk-"):
+            env_info["detected_format"] = "plain_text"
+        elif raw_api_key.strip().startswith("{"):
+            env_info["detected_format"] = "json"
+        else:
+            env_info["detected_format"] = "unknown"
+    
+    if parsed_api_key:
+        env_info["openai_api_key_parsed_preview"] = f"{parsed_api_key[:7]}..." if len(parsed_api_key) > 7 else "too_short"
     
     return env_info
 

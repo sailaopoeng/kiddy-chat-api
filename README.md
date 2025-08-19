@@ -159,6 +159,16 @@ When inappropriate content is detected:
 - **Max Tokens**: 300 (appropriate length)
 - **Moderation**: Dual-layer filtering
 
+### AWS Secrets Manager Support
+- **Flexible API Key Format**: Supports both plain text and JSON formats
+- **Automatic Detection**: Intelligently parses the secret format
+- **Production Ready**: Seamless integration with AWS infrastructure
+- **Enhanced Logging**: Detailed format detection and parsing logs
+
+The application automatically handles OpenAI API keys from AWS Secrets Manager in either format:
+- Plain text: `sk-1234567890abcdef...`
+- JSON: `{"OPENAI_API_KEY": "sk-1234567890abcdef..."}`
+
 ### Custom Prompts
 - **Additive Only**: Never replaces safety prompts
 - **Session Scoped**: Per-session customization
