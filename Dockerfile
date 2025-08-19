@@ -26,8 +26,5 @@ COPY . .
 # Expose port (AWS App Runner uses 8080 by default)
 EXPOSE 8080
 
-# Run the application with direct Python for better logging visibility
-# Alternative options for production (commented out):
-# CMD ["gunicorn", "main:app", "-w", "4", "-k", "uvicorn.workers.UvicornWorker", "--bind", "0.0.0.0:8080", "--access-logfile", "-", "--error-logfile", "-"]
-# CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080", "--log-level", "info"]
-CMD ["python3", "main.py"]
+# Run the application with gunicorn for production
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
