@@ -13,6 +13,8 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import openai
 
+app_version = "1.0.0"
+
 # Configure logging for AWS App Runner
 logging.basicConfig(
     level=logging.INFO,
@@ -54,13 +56,13 @@ def parse_openai_api_key(raw_key: str) -> Optional[str]:
     
     # Check if it's already a plain text API key
     if raw_key.startswith("sk-"):
-        logger.info("🔑 API key detected as plain text format")
+        logger.info("API key detected as plain text format")
         return raw_key
     
     # Try to parse as JSON (AWS Secrets Manager format)
     try:
         key_data = json.loads(raw_key)
-        logger.info("🔑 API key detected as JSON format")
+        logger.info("API key detected as JSON format")
         
         # Common JSON key names used in AWS Secrets Manager
         possible_keys = ['OPENAI_API_KEY', 'openai_api_key', 'api_key', 'key', 'apiKey']
@@ -69,63 +71,63 @@ def parse_openai_api_key(raw_key: str) -> Optional[str]:
             if key_name in key_data:
                 extracted_key = key_data[key_name]
                 if extracted_key and isinstance(extracted_key, str) and extracted_key.startswith("sk-"):
-                    logger.info(f"✅ Successfully extracted API key from JSON field: {key_name}")
+                    logger.info(f"Successfully extracted API key from JSON field: {key_name}")
                     return extracted_key
         
         # If no standard key found, log available keys for debugging
-        logger.warning(f"⚠️  JSON format detected but no valid API key found. Available keys: {list(key_data.keys())}")
+        logger.warning(f"JSON format detected but no valid API key found. Available keys: {list(key_data.keys())}")
         return None
         
     except json.JSONDecodeError:
         # Not JSON format, might be some other format
-        logger.warning("⚠️  API key is not in plain text or valid JSON format")
-        logger.warning(f"⚠️  Raw key preview: {raw_key[:20]}..." if len(raw_key) > 20 else f"⚠️  Raw key: {raw_key}")
+        logger.warning("API key is not in plain text or valid JSON format")
+        logger.warning(f"Raw key preview: {raw_key[:20]}..." if len(raw_key) > 20 else f"Raw key: {raw_key}")
         return None
     except Exception as e:
-        logger.error(f"❌ Unexpected error parsing API key: {e}")
+        logger.error(f"Unexpected error parsing API key: {e}")
         return None
 
 # Initialize FastAPI app
 app = FastAPI(
     title="Kiddy Chat API", 
-    version="1.0.0",
-    description="A safe and fun AI chat API designed specifically for kids! 🌟"
+    version=app_version,
+    description="A safe and fun AI chat API designed specifically for kids!"
 )
 
 @app.on_event("startup")
 async def startup_event():
     """Log application startup information"""
-    logger.info("🚀 Kiddy Chat API is starting up!")
-    logger.info(f"📊 OpenAI client status: {'✅ Ready' if client else '❌ Failed'}")
-    logger.info(f"🔐 API key status: {'✅ Configured' if api_key else '❌ Missing'}")
-    logger.info("🌟 Ready to serve safe and fun conversations for kids!")
+    logger.info("Kiddy Chat API is starting up!")
+    logger.info(f"OpenAI client status: {'Ready' if client else 'Failed'}")
+    logger.info(f"API key status: {'Configured' if api_key else 'Missing'}")
+    logger.info("Ready to serve safe and fun conversations for kids!")
 
 @app.on_event("shutdown")
 async def shutdown_event():
     """Log application shutdown"""
-    logger.info("👋 Kiddy Chat API is shutting down. Goodbye!")
+    logger.info("Kiddy Chat API is shutting down. Goodbye!")
 
 # Initialize OpenAI client with logging
 raw_api_key = os.getenv("OPENAI_API_KEY")
-logger.info("🔍 Checking OPENAI_API_KEY...")
+logger.info("Checking OPENAI_API_KEY...")
 
 if raw_api_key:
-    logger.info(f"✅ OPENAI_API_KEY environment variable found (length: {len(raw_api_key)} characters)")
+    logger.info(f"OPENAI_API_KEY environment variable found (length: {len(raw_api_key)} characters)")
     api_key = parse_openai_api_key(raw_api_key)
     
     if api_key:
-        logger.info(f"✅ Successfully parsed API key (length: {len(api_key)} characters)")
-        logger.info(f"🔑 Key starts with: {api_key[:7]}..." if len(api_key) > 7 else "🔑 Key too short")
+        logger.info(f"Successfully parsed API key (length: {len(api_key)} characters)")
+        logger.info(f"Key starts with: {api_key[:7]}..." if len(api_key) > 7 else "Key too short")
         if api_key.startswith("sk-"):
-            logger.info("✅ API key has correct format (starts with 'sk-')")
+            logger.info("API key has correct format (starts with 'sk-')")
         else:
-            logger.warning("⚠️  Warning: API key doesn't start with 'sk-' - might be invalid")
+            logger.warning("Warning: API key doesn't start with 'sk-' - might be invalid")
     else:
-        logger.error("❌ Failed to parse API key from environment variable")
+        logger.error("Failed to parse API key from environment variable")
         api_key = None
 else:
-    logger.error("❌ OPENAI_API_KEY not found in environment variables!")
-    logger.info("🔍 Available environment variables:")
+    logger.error("OPENAI_API_KEY not found in environment variables!")
+    logger.info("Available environment variables:")
     for key in sorted(os.environ.keys()):
         if 'OPENAI' in key.upper() or 'API' in key.upper() or 'KEY' in key.upper():
             logger.info(f"   - {key}")
@@ -133,9 +135,9 @@ else:
 
 try:
     client = openai.OpenAI(api_key=api_key)
-    logger.info("✅ OpenAI client initialized successfully")
+    logger.info("OpenAI client initialized successfully")
 except Exception as e:
-    logger.error(f"❌ Failed to initialize OpenAI client: {e}")
+    logger.error(f"Failed to initialize OpenAI client: {e}")
     client = None
 
 if not api_key:
@@ -312,7 +314,7 @@ async def root():
     return {
         "message": "Welcome to Kiddy Chat API! 🌟 A safe and fun place to chat with AI! 🤖",
         "status": "Ready for awesome conversations!",
-        "version": "1.0.0",
+        "version": app_version,
         "openai_api_key_status": "configured" if api_key else "missing",
         "openai_client_status": "initialized" if client else "failed"
     }
@@ -477,9 +479,9 @@ async def get_active_sessions():
     """
     cleanup_expired_sessions()
     return {
-        "active_sessions": len(sessions),
-        "session_ids": list(sessions.keys())
+        "active_sessions": len(sessions)    
     }
+    # "session_ids": list(sessions.keys())
 
 @app.get("/conversation-starters")
 async def get_conversation_starters():
@@ -624,7 +626,5 @@ if __name__ == "__main__":
     import uvicorn
     import os
     port = int(os.getenv("PORT", 8080))
-    logger.info(f"🚀 Starting Kiddy Chat API on port {port}")
-    logger.info(f"🌟 API Version: 1.0.0")
-    logger.info(f"🔧 Environment: {'Production' if os.getenv('PORT') else 'Development'}")
+    logger.info(f"Starting Kiddy Chat API ({app_version}) on port {port} [{'Production' if os.getenv('PORT') else 'Development'}]")
     uvicorn.run(app, host="0.0.0.0", port=port)
