@@ -2,6 +2,9 @@
 
 A safe and fun FastAPI-based chat application designed specifically for kids! This app integrates with OpenAI's GPT-4o-mini model and includes comprehensive content filtering to ensure age-appropriate conversations.
 
+## Live Demo
+You can try the live demo at [Kiddy Chat API Demo](https://kiddy-chat-api.sailaopoeng.com/docs).
+
 ## Features
 
 ### Safety Features
