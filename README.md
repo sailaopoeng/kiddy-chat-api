@@ -25,6 +25,7 @@ You can try the live demo at [Kiddy Chat API Demo](https://kiddy-chat-api.sailao
 - **Chat History**: Maintain conversation context
 - **RESTful API**: Clean, documented endpoints
 - **Filter Transparency**: View current filters and prompts
+- **CORS Support**: Accept requests from any client origin
 
 ## Quick Start
 

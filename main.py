@@ -8,6 +8,7 @@ from datetime import datetime, timedelta
 from typing import Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -94,10 +95,20 @@ app = FastAPI(
     description="A safe and fun AI chat API designed specifically for kids!"
 )
 
+# Add CORS middleware to allow requests from any origin
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],  # Allows all origins
+    allow_credentials=True,
+    allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
+    allow_headers=["*"],  # Allows all headers
+)
+
 @app.on_event("startup")
 async def startup_event():
     """Log application startup information"""
     logger.info("Kiddy Chat API is starting up!")
+    logger.info("CORS middleware enabled - accepting requests from all origins")
     logger.info(f"OpenAI client status: {'Ready' if client else 'Failed'}")
     logger.info(f"API key status: {'Configured' if api_key else 'Missing'}")
     logger.info("Ready to serve safe and fun conversations for kids!")
