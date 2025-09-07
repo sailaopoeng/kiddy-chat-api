@@ -224,7 +224,8 @@ def contains_inappropriate_content(message: str) -> bool:
     
     # Check for inappropriate words
     for word in INAPPROPRIATE_WORDS:
-        if word in message_lower:
+        # Use word boundaries to ensure whole word matching
+        if re.search(rf'\b{re.escape(word)}\b', message_lower):
             return True
     
     # Check for inappropriate patterns
