@@ -64,7 +64,7 @@ This project now supports Vercel's native Python/FastAPI runtime.
    - `ENABLE_DEBUG_ENDPOINTS` (optional; keep unset in production)
 4. Deploy with Vercel.
 
-The Vercel config targets the Singapore region (`sin1`) in `vercel.json`. `pyproject.toml` points Vercel at the FastAPI app entrypoint (`main:app`) and pins Python 3.12.
+The Vercel config targets the Singapore region (`sin1`) in `vercel.json`. `pyproject.toml` points Vercel at the FastAPI app entrypoint (`main:app`) through `[project.scripts]`, pins Python 3.12, and mirrors the deployment dependencies.
 
 ### 5. AWS App Runner Deployment History
 For AWS App Runner deployment, the app is already configured with:
