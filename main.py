@@ -5,7 +5,7 @@ import logging
 import sys
 import json
 from datetime import datetime, timedelta
-from typing import Dict, Optional, List
+from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -14,20 +14,26 @@ from pydantic import BaseModel
 from dotenv import load_dotenv
 import openai
 
+try:
+    from upstash_redis.asyncio import Redis as AsyncRedis
+except ImportError:
+    AsyncRedis = None
+
 app_version = "1.0.0"
 
-# Configure logging for AWS App Runner
+# Configure logging for AWS App Runner and Vercel functions
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.StreamHandler(sys.stdout)  # Ensure logs go to stdout for AWS App Runner
+        logging.StreamHandler(sys.stdout)  # Ensure logs go to stdout for hosted runtimes
     ],
     force=True  # Override any existing logging configuration
 )
 
-# Ensure stdout is unbuffered for immediate log visibility in AWS App Runner
-sys.stdout.reconfigure(line_buffering=True)
+# Ensure stdout is unbuffered for immediate log visibility in hosted runtimes
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(line_buffering=True)
 
 # Create logger for this module
 logger = logging.getLogger(__name__)
@@ -37,6 +43,10 @@ os.environ['PYTHONUNBUFFERED'] = '1'
 
 # Load environment variables
 load_dotenv()
+
+SESSION_TTL_SECONDS = 24 * 60 * 60
+SESSION_INDEX_KEY = "sessions:index"
+SESSION_KEY_PREFIX = "session:"
 
 def parse_openai_api_key(raw_key: str) -> Optional[str]:
     """
@@ -95,11 +105,19 @@ app = FastAPI(
     description="A safe and fun AI chat API designed specifically for kids!"
 )
 
-# Add CORS middleware to allow requests from any origin
+def get_allowed_origins() -> List[str]:
+    """Read comma-separated allowed origins from the environment."""
+    raw_origins = os.getenv("ALLOWED_ORIGINS", "*")
+    origins = [origin.strip() for origin in raw_origins.split(",") if origin.strip()]
+    return origins or ["*"]
+
+allowed_origins = get_allowed_origins()
+
+# Add CORS middleware
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],  # Allows all origins
-    allow_credentials=True,
+    allow_origins=allowed_origins,
+    allow_credentials="*" not in allowed_origins,
     allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
     allow_headers=["*"],  # Allows all headers
 )
@@ -108,9 +126,10 @@ app.add_middleware(
 async def startup_event():
     """Log application startup information"""
     logger.info("Kiddy Chat API is starting up!")
-    logger.info("CORS middleware enabled - accepting requests from all origins")
+    logger.info(f"CORS middleware enabled for origins: {allowed_origins}")
     logger.info(f"OpenAI client status: {'Ready' if client else 'Failed'}")
     logger.info(f"API key status: {'Configured' if api_key else 'Missing'}")
+    logger.info(f"Session storage: {session_store_backend}")
     logger.info("Ready to serve safe and fun conversations for kids!")
 
 @app.on_event("shutdown")
@@ -137,7 +156,7 @@ if raw_api_key:
         logger.error("Failed to parse API key from environment variable")
         api_key = None
 else:
-    logger.error("OPENAI_API_KEY not found in environment variables!")
+    logger.warning("OPENAI_API_KEY not found in environment variables")
     logger.info("Available environment variables:")
     for key in sorted(os.environ.keys()):
         if 'OPENAI' in key.upper() or 'API' in key.upper() or 'KEY' in key.upper():
@@ -151,14 +170,21 @@ except Exception as e:
     logger.error(f"Failed to initialize OpenAI client: {e}")
     client = None
 
-if not api_key:
-    raise ValueError("OPENAI_API_KEY not found in environment variables")
-
 # Security
 security = HTTPBearer()
 
-# In-memory session storage (in production, use Redis or database)
+# In-memory fallback keeps legacy local/Docker/App Runner usage possible when Redis is not configured.
 sessions: Dict[str, Dict] = {}
+
+redis_client = None
+if AsyncRedis and os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
+    redis_client = AsyncRedis(
+        url=os.getenv("UPSTASH_REDIS_REST_URL"),
+        token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
+        allow_telemetry=False,
+    )
+
+session_store_backend = "upstash_redis" if redis_client else "in_memory"
 
 # Pydantic models
 class InitiateSessionRequest(BaseModel):
@@ -257,8 +283,88 @@ def get_kids_system_prompt() -> str:
 
 Remember: You're talking to a child, so keep everything safe, educational, and fun!"""
 
+def session_key(session_id: str) -> str:
+    return f"{SESSION_KEY_PREFIX}{session_id}"
+
+def utc_now() -> datetime:
+    return datetime.utcnow()
+
+def serialize_session(session_data: Dict[str, Any]) -> str:
+    payload = dict(session_data)
+    for field in ("created_at", "last_activity"):
+        if isinstance(payload.get(field), datetime):
+            payload[field] = payload[field].isoformat()
+    return json.dumps(payload)
+
+def deserialize_session(raw_session: Any) -> Optional[Dict[str, Any]]:
+    if not raw_session:
+        return None
+
+    if isinstance(raw_session, dict):
+        session_data = raw_session
+    else:
+        session_data = json.loads(raw_session)
+
+    for field in ("created_at", "last_activity"):
+        if isinstance(session_data.get(field), str):
+            session_data[field] = datetime.fromisoformat(session_data[field])
+    return session_data
+
+async def prune_expired_session_index():
+    expires_before = int((utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)).timestamp())
+
+    if redis_client:
+        await redis_client.zremrangebyscore(SESSION_INDEX_KEY, 0, expires_before)
+        return
+
+    expired_session_ids = [
+        session_id for session_id, session_data in sessions.items()
+        if session_data["last_activity"] < utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)
+    ]
+    for session_id in expired_session_ids:
+        del sessions[session_id]
+
+async def save_session(session_id: str, session_data: Dict[str, Any]):
+    session_data["last_activity"] = utc_now()
+
+    if redis_client:
+        serialized = serialize_session(session_data)
+        await redis_client.set(session_key(session_id), serialized, ex=SESSION_TTL_SECONDS)
+        await redis_client.zadd(SESSION_INDEX_KEY, {session_id: int(session_data["last_activity"].timestamp())})
+        return
+
+    sessions[session_id] = session_data
+
+async def get_session(session_id: str, refresh_ttl: bool = False) -> Optional[Dict[str, Any]]:
+    if redis_client:
+        raw_session = await redis_client.get(session_key(session_id))
+        session_data = deserialize_session(raw_session)
+        if session_data and refresh_ttl:
+            await save_session(session_id, session_data)
+        return session_data
+
+    session_data = sessions.get(session_id)
+    if not session_data:
+        return None
+
+    if session_data["last_activity"] < utc_now() - timedelta(seconds=SESSION_TTL_SECONDS):
+        del sessions[session_id]
+        return None
+
+    if refresh_ttl:
+        session_data["last_activity"] = utc_now()
+    return session_data
+
+async def delete_session(session_id: str):
+    if redis_client:
+        await redis_client.delete(session_key(session_id))
+        await redis_client.zrem(SESSION_INDEX_KEY, session_id)
+        return
+
+    sessions.pop(session_id, None)
+
 # Session management
-def create_session(username: str, additional_prompt: str = None) -> str:
+async def create_session(username: str, additional_prompt: str = None) -> str:
     """Create a new session for a user with optional additional prompt"""
     session_id = str(uuid.uuid4())
     
@@ -271,10 +377,10 @@ def create_session(username: str, additional_prompt: str = None) -> str:
         combined_prompt = base_prompt
         logger.info(f"Creating session {session_id[:8]}... for {username} with default prompt")
     
-    sessions[session_id] = {
+    session_data = {
         "username": username,
-        "created_at": datetime.now(),
-        "last_activity": datetime.now(),
+        "created_at": utc_now(),
+        "last_activity": utc_now(),
         "additional_prompt": additional_prompt,
         "messages": [
             {
@@ -283,41 +389,31 @@ def create_session(username: str, additional_prompt: str = None) -> str:
             }
         ]
     }
+
+    await save_session(session_id, session_data)
     
-    logger.info(f"Session {session_id[:8]}... created successfully. Total active sessions: {len(sessions)}")
+    logger.info(f"Session {session_id[:8]}... created successfully")
     return session_id
 
-def validate_session(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
     """Validate session token"""
     session_id = credentials.credentials
     
-    if session_id not in sessions:
+    session_data = await get_session(session_id, refresh_ttl=True)
+    if not session_data:
         logger.warning(f"Invalid session ID attempted: {session_id[:8]}...")
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid session ID"
         )
-    
-    # Update last activity
-    sessions[session_id]["last_activity"] = datetime.now()
     logger.debug(f"Session validated and activity updated: {session_id[:8]}...")
     
     return session_id
 
-def cleanup_expired_sessions():
+async def cleanup_expired_sessions():
     """Clean up sessions older than 24 hours"""
-    cutoff_time = datetime.now() - timedelta(hours=24)
-    expired_sessions = [
-        session_id for session_id, session_data in sessions.items()
-        if session_data["last_activity"] < cutoff_time
-    ]
-    
-    if expired_sessions:
-        logger.info(f"Cleaning up {len(expired_sessions)} expired sessions")
-        for session_id in expired_sessions:
-            del sessions[session_id]
-    
-    logger.debug(f"Session cleanup complete. Active sessions: {len(sessions)}")
+    await prune_expired_session_index()
+    logger.debug("Session cleanup complete")
 
 # API Endpoints
 @app.get("/")
@@ -346,10 +442,10 @@ async def initiate_session(request: InitiateSessionRequest):
         )
     
     # Clean up expired sessions
-    cleanup_expired_sessions()
+    await cleanup_expired_sessions()
     
     # Create new session
-    session_id = create_session(request.username)
+    session_id = await create_session(request.username)
     
     logger.info(f"Session {session_id} created successfully for user: {request.username}")
     
@@ -372,7 +468,13 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
             detail="Message cannot be empty"
         )
     
-    session_data = sessions[session_id]
+    session_data = await get_session(session_id)
+    if not session_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session ID"
+        )
+
     username = session_data["username"]
     
     logger.info(f"Processing query for user {username} (session: {session_id[:8]}...): {request.message[:50]}...")
@@ -393,6 +495,7 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
             "role": "assistant",
             "content": kid_friendly_response
         })
+        await save_session(session_id, session_data)
         
         return QueryResponse(
             response=kid_friendly_response,
@@ -405,6 +508,20 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
         "role": "user",
         "content": request.message
     })
+
+    if not client:
+        logger.error("OpenAI client is not initialized")
+        error_response = "Oops! I'm having a little trouble right now. Can you try again later? ðŸ¤–"
+        session_data["messages"].append({
+            "role": "assistant",
+            "content": error_response
+        })
+        await save_session(session_id, session_data)
+        return QueryResponse(
+            response=error_response,
+            session_id=session_id,
+            username=username
+        )
     
     try:
         logger.info(f"Sending request to OpenAI for user {username}")
@@ -432,6 +549,7 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
             "role": "assistant",
             "content": assistant_message
         })
+        await save_session(session_id, session_data)
         
         return QueryResponse(
             response=assistant_message,
@@ -448,6 +566,7 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
             "role": "assistant",
             "content": error_response
         })
+        await save_session(session_id, session_data)
         
         return QueryResponse(
             response=error_response,
@@ -456,11 +575,22 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
         )
 
 @app.get("/session/{session_id}/history")
-async def get_session_history(session_id: str = Depends(validate_session)):
+async def get_session_history(session_id: str, auth_session_id: str = Depends(validate_session)):
     """
     Get chat history for a session
     """
-    session_data = sessions[session_id]
+    if session_id != auth_session_id:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session ID"
+        )
+
+    session_data = await get_session(auth_session_id)
+    if not session_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session ID"
+        )
     
     return {
         "session_id": session_id,
@@ -474,10 +604,11 @@ async def end_session(session_id: str = Depends(validate_session)):
     """
     End a chat session
     """
-    username = sessions[session_id]["username"]
-    del sessions[session_id]
+    session_data = await get_session(session_id)
+    username = session_data["username"] if session_data else "unknown"
+    await delete_session(session_id)
     
-    logger.info(f"Session ended for user {username}. Session ID: {session_id[:8]}... Active sessions: {len(sessions)}")
+    logger.info(f"Session ended for user {username}. Session ID: {session_id[:8]}...")
     
     return {
         "message": f"Session ended successfully for {username}",
@@ -489,9 +620,14 @@ async def get_active_sessions():
     """
     Get count of active sessions (for monitoring)
     """
-    cleanup_expired_sessions()
+    await cleanup_expired_sessions()
+    if redis_client:
+        active_sessions = await redis_client.zcard(SESSION_INDEX_KEY)
+    else:
+        active_sessions = len(sessions)
+
     return {
-        "active_sessions": len(sessions)    
+        "active_sessions": active_sessions
     }
     # "session_ids": list(sessions.keys())
 
@@ -533,6 +669,12 @@ async def debug_environment():
     """
     Debug endpoint to check environment variable status
     """
+    if os.getenv("ENABLE_DEBUG_ENDPOINTS", "").lower() != "true":
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Not found"
+        )
+
     raw_api_key = os.getenv("OPENAI_API_KEY")
     parsed_api_key = parse_openai_api_key(raw_api_key) if raw_api_key else None
     
@@ -545,6 +687,7 @@ async def debug_environment():
         "openai_client_initialized": client is not None,
         "port": os.getenv("PORT", "not_set"),
         "python_path": os.getenv("PYTHONPATH", "not_set"),
+        "session_store_backend": session_store_backend,
         "environment_variables_with_key_or_api": [
             key for key in os.environ.keys() 
             if any(word in key.upper() for word in ['OPENAI', 'API', 'KEY'])
@@ -553,9 +696,6 @@ async def debug_environment():
     
     # Add format detection
     if raw_api_key:
-        raw_preview = f"{raw_api_key[:20]}..." if len(raw_api_key) > 20 else raw_api_key
-        env_info["openai_api_key_raw_preview"] = raw_preview
-        
         # Detect format
         if raw_api_key.strip().startswith("sk-"):
             env_info["detected_format"] = "plain_text"
@@ -563,9 +703,6 @@ async def debug_environment():
             env_info["detected_format"] = "json"
         else:
             env_info["detected_format"] = "unknown"
-    
-    if parsed_api_key:
-        env_info["openai_api_key_parsed_preview"] = f"{parsed_api_key[:7]}..." if len(parsed_api_key) > 7 else "too_short"
     
     return env_info
 
@@ -593,7 +730,12 @@ async def add_session_prompt(request: AddPromptRequest, session_id: str = Depend
             detail="Additional prompt cannot be empty"
         )
     
-    session_data = sessions[session_id]
+    session_data = await get_session(session_id)
+    if not session_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session ID"
+        )
     
     # Update the additional prompt for this session
     session_data["additional_prompt"] = request.additional_prompt
@@ -611,6 +753,8 @@ async def add_session_prompt(request: AddPromptRequest, session_id: str = Depend
             "role": "system",
             "content": combined_prompt
         })
+
+    await save_session(session_id, session_data)
     
     return AddPromptResponse(
         message="Additional prompt added successfully! This will guide our conversation while keeping all safety features active.",
@@ -623,7 +767,12 @@ async def get_session_prompt_info(session_id: str = Depends(validate_session)):
     """
     Get the current session's prompt information including any additional prompts
     """
-    session_data = sessions[session_id]
+    session_data = await get_session(session_id)
+    if not session_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session ID"
+        )
     
     return {
         "session_id": session_id,
