@@ -38,8 +38,12 @@ pip install -r requirements.txt
 Create a `.env` file:
 ```env
 OPENAI_API_KEY=your_openai_api_key_here
-SECRET_KEY=your_secret_key_here
+UPSTASH_REDIS_REST_URL=your_upstash_redis_rest_url
+UPSTASH_REDIS_REST_TOKEN=your_upstash_redis_rest_token
+ALLOWED_ORIGINS=*
 ```
+
+`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are required for durable sessions on Vercel. If they are absent, the app falls back to in-memory sessions for legacy local/Docker/App Runner usage.
 
 ### 3. Run Application
 ```bash
@@ -47,14 +51,33 @@ python main.py
 ```
 Visit: `http://localhost:8080/docs` for interactive API documentation.
 
-### 4. AWS App Runner Deployment
+### 4. Vercel Deployment
+This project now supports Vercel's native Python/FastAPI runtime.
+
+1. Create or connect the Vercel project.
+2. Add an Upstash Redis database from Vercel Marketplace or Upstash.
+3. Configure these Vercel environment variables:
+   - `OPENAI_API_KEY`
+   - `UPSTASH_REDIS_REST_URL`
+   - `UPSTASH_REDIS_REST_TOKEN`
+   - `ALLOWED_ORIGINS` (optional, comma-separated; defaults to `*`)
+   - `ENABLE_DEBUG_ENDPOINTS` (optional; keep unset in production)
+4. Deploy with Vercel.
+
+The Vercel config targets the Singapore region (`sin1`) in `vercel.json`. `pyproject.toml` points Vercel at the FastAPI app entrypoint (`main:app`) and pins Python 3.12.
+
+### 5. AWS App Runner Deployment History
 For AWS App Runner deployment, the app is already configured with:
 - Docker support (Dockerfile included)
 - Python 3.11 compatibility
 - Production-ready uvicorn server
 - Health checks for AWS App Runner
 
-### 5. Local Testing with Docker
+These files are retained as deployment history and rollback reference:
+- `Dockerfile`
+- `apprunner.yaml`
+
+### 6. Local Testing with Docker
 ```bash
 # Build the image
 docker build -t kiddy-chat-api .
@@ -62,7 +85,8 @@ docker build -t kiddy-chat-api .
 # Run locally (same as AWS App Runner)
 docker run -p 8080:8080 \
   -e OPENAI_API_KEY=your_key \
-  -e SECRET_KEY=your_secret \
+  -e UPSTASH_REDIS_REST_URL=your_upstash_url \
+  -e UPSTASH_REDIS_REST_TOKEN=your_upstash_token \
   kiddy-chat-api
 ```
 
@@ -91,6 +115,16 @@ docker run -p 8080:8080 \
 |--------|----------|-------------|
 | POST | `/session/add-prompt` | Add custom session prompt (requires auth) |
 | GET | `/session/prompt-info` | Get session prompt details (requires auth) |
+
+### Debug Endpoints
+
+`GET /debug/env-check` is disabled by default and returns 404. Enable it only for temporary troubleshooting by setting:
+
+```env
+ENABLE_DEBUG_ENDPOINTS=true
+```
+
+The endpoint reports configuration status only and does not return API key previews.
 
 ## Authentication
 
@@ -179,15 +213,49 @@ The application automatically handles OpenAI API keys from AWS Secrets Manager i
 - **Safety Preserved**: All filtering remains active
 - **Educational**: Perfect for tutoring contexts
 
+## Session Storage
+
+Sessions are stored in Upstash Redis when these environment variables are configured:
+
+```env
+UPSTASH_REDIS_REST_URL=your_upstash_redis_rest_url
+UPSTASH_REDIS_REST_TOKEN=your_upstash_redis_rest_token
+```
+
+Each session is stored as `session:{session_id}` with a 24-hour TTL. Active session IDs are tracked in `sessions:index` so `/sessions/active` can count sessions without scanning every key.
+
+If Upstash is not configured, the app uses in-memory session storage as a legacy fallback. That fallback is not reliable on Vercel because serverless instances can cold start or scale independently.
+
+### Redis Data Purge
+
+Session data is temporary and can be purged safely when you need to reset the environment.
+
+Dry run:
+
+```bash
+python scripts/purge_redis_sessions.py
+```
+
+Delete all `session:*` keys and `sessions:index`:
+
+```bash
+python scripts/purge_redis_sessions.py --confirm
+```
+
+The purge script requires `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` in the environment. No public HTTP purge endpoint is exposed.
+
 ## Project Structure
 
 ```
 gpt-for-kids-backend/
-├── main.py              # FastAPI application
-├── requirements.txt     # Dependencies  
-├── .env                # Environment variables
-├── Dockerfile          # Container config
-└── README.md           # Documentation
+|-- main.py                         # FastAPI application
+|-- requirements.txt                # Dependencies
+|-- pyproject.toml                  # Vercel Python runtime config
+|-- vercel.json                     # Vercel region config
+|-- scripts/purge_redis_sessions.py # Redis session purge utility
+|-- Dockerfile                      # Legacy App Runner/container config
+|-- apprunner.yaml                  # Legacy App Runner config
+`-- README.md                       # Documentation
 ```
 
 ## 🔧 Error Handling
@@ -200,13 +268,12 @@ gpt-for-kids-backend/
 
 ## Security
 
-- **Sessions**: In-memory storage, 24-hour expiration
+- **Sessions**: Upstash Redis storage with 24-hour expiration on Vercel
 - **API Keys**: Secure storage, never commit to version control
+- **Debugging**: Debug environment endpoint disabled by default
 
 **TODO**: :
-   - Using Redis or a database for session storage
    - Implementing rate limiting
-   - Using proper secret management
 
 ## License
 
