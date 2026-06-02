@@ -66,14 +66,14 @@ This project now supports Vercel's native Python/FastAPI runtime.
 
 The Vercel config targets the Singapore region (`sin1`) in `vercel.json`. `pyproject.toml` points Vercel at the FastAPI app entrypoint (`main:app`) through `[project.scripts]`, pins Python 3.12, and mirrors the deployment dependencies.
 
-### 5. AWS App Runner Deployment History
+### 5. AWS App Runner Deployment [legacy]
 For AWS App Runner deployment, the app is already configured with:
 - Docker support (Dockerfile included)
 - Python 3.11 compatibility
 - Production-ready uvicorn server
 - Health checks for AWS App Runner
 
-These files are retained as deployment history and rollback reference:
+These files are retained as [legacy] deployment for AWS App Runner and rollback reference:
 - `Dockerfile`
 - `apprunner.yaml`
 
@@ -108,6 +108,7 @@ docker run -p 8080:8080 \
 |--------|----------|-------------|
 | GET | `/conversation-starters` | Get fun conversation topics |
 | GET | `/filter-info` | Get current filters and prompts |
+| GET | `/redoc` | ReDoc API documentation with pinned ReDoc assets |
 
 ### Advanced Features
 

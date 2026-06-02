@@ -9,6 +9,7 @@ from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, Depends, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.openapi.docs import get_redoc_html
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -102,7 +103,8 @@ def parse_openai_api_key(raw_key: str) -> Optional[str]:
 app = FastAPI(
     title="Kiddy Chat API", 
     version=app_version,
-    description="A safe and fun AI chat API designed specifically for kids!"
+    description="A safe and fun AI chat API designed specifically for kids!",
+    redoc_url=None
 )
 
 def get_allowed_origins() -> List[str]:
@@ -426,6 +428,15 @@ async def root():
         "openai_api_key_status": "configured" if api_key else "missing",
         "openai_client_status": "initialized" if client else "failed"
     }
+
+@app.get("/redoc", include_in_schema=False)
+async def redoc_docs():
+    """Serve ReDoc with a pinned asset URL instead of FastAPI's moving @next default."""
+    return get_redoc_html(
+        openapi_url=app.openapi_url,
+        title=f"{app.title} - ReDoc",
+        redoc_js_url="https://cdn.redoc.ly/redoc/v2.0.0/bundles/redoc.standalone.js",
+    )
 
 @app.post("/initiate-session", response_model=InitiateSessionResponse)
 async def initiate_session(request: InitiateSessionRequest):
