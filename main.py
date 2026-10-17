@@ -1,4 +1,7 @@
+import asyncio
+import hmac
 import os
+import time
 import uuid
 import re
 import logging
@@ -7,7 +10,8 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List
 
-from fastapi import FastAPI, HTTPException, Depends, status
+from fastapi import FastAPI, HTTPException, Depends, Header, status
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -93,7 +97,6 @@ def parse_openai_api_key(raw_key: str) -> Optional[str]:
     except json.JSONDecodeError:
         # Not JSON format, might be some other format
         logger.warning("API key is not in plain text or valid JSON format")
-        logger.warning(f"Raw key preview: {raw_key[:20]}..." if len(raw_key) > 20 else f"Raw key: {raw_key}")
         return None
     except Exception as e:
         logger.error(f"Unexpected error parsing API key: {e}")
@@ -131,7 +134,7 @@ async def startup_event():
     logger.info(f"CORS middleware enabled for origins: {allowed_origins}")
     logger.info(f"OpenAI client status: {'Ready' if client else 'Failed'}")
     logger.info(f"API key status: {'Configured' if api_key else 'Missing'}")
-    logger.info(f"Session storage: {session_store_backend}")
+    logger.info(f"Session storage: {await current_store_mode()}")
     logger.info("Ready to serve safe and fun conversations for kids!")
 
 @app.on_event("shutdown")
@@ -175,18 +178,97 @@ except Exception as e:
 # Security
 security = HTTPBearer()
 
-# In-memory fallback keeps legacy local/Docker/App Runner usage possible when Redis is not configured.
+# In-process session store. Used when Redis is not configured, and as a fallback
+# whenever Redis calls fail. Sessions here are lost on cold starts and are not
+# shared between instances.
 sessions: Dict[str, Dict] = {}
 
+# Checked in order; the first pair with both URL and token set wins.
+REDIS_ENV_PAIRS = [
+    ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"),
+    ("UPSTASH2_KV_REST_API_URL", "UPSTASH2_KV_REST_API_TOKEN"),
+    ("KV_REST_API_URL", "KV_REST_API_TOKEN"),
+]
+
+# Upper bound for a single Redis call. The upstash client has no HTTP timeout
+# of its own, so without this a hung connection could stall a request.
+REDIS_OP_TIMEOUT_SECONDS = 3.0
+# After a Redis failure, skip Redis for this long so requests don't keep
+# waiting on a dead database.
+REDIS_FAILURE_COOLDOWN_SECONDS = 60
+KEEPALIVE_KEY = "keepalive"
+KEEPALIVE_TTL_SECONDS = 24 * 60 * 60
+
+def resolve_redis_config() -> Optional[Dict[str, str]]:
+    for url_var, token_var in REDIS_ENV_PAIRS:
+        url = os.getenv(url_var)
+        token = os.getenv(token_var)
+        if url and token:
+            return {"url": url, "token": token, "source": url_var}
+    return None
+
+redis_config = resolve_redis_config()
 redis_client = None
-if AsyncRedis and os.getenv("UPSTASH_REDIS_REST_URL") and os.getenv("UPSTASH_REDIS_REST_TOKEN"):
-    redis_client = AsyncRedis(
-        url=os.getenv("UPSTASH_REDIS_REST_URL"),
-        token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
-        allow_telemetry=False,
+if AsyncRedis and redis_config:
+    try:
+        redis_client = AsyncRedis(
+            url=redis_config["url"],
+            token=redis_config["token"],
+            allow_telemetry=False,
+            # Fail fast; the in-memory fallback handles errors instead of a 3s retry.
+            rest_retries=0,
+        )
+        logger.info(f"Redis configured from {redis_config['source']}")
+    except Exception as e:
+        logger.warning(f"Could not create Redis client ({type(e).__name__}); using in-memory sessions")
+        redis_client = None
+elif not redis_config:
+    logger.info("No Redis env vars found; using in-memory sessions")
+
+# None = not checked yet on this instance, True = last call worked, False = last call failed.
+redis_healthy: Optional[bool] = None
+redis_last_failure_at = 0.0
+
+def mark_redis_failure(operation: str, error: Exception):
+    global redis_healthy, redis_last_failure_at
+    redis_healthy = False
+    redis_last_failure_at = time.monotonic()
+    logger.warning(
+        f"Redis {operation} failed ({type(error).__name__}); "
+        f"using in-memory sessions for the next {REDIS_FAILURE_COOLDOWN_SECONDS}s"
     )
 
-session_store_backend = "upstash_redis" if redis_client else "in_memory"
+def mark_redis_success():
+    global redis_healthy
+    if redis_healthy is False:
+        logger.info("Redis is reachable again; switching back to Redis sessions")
+    redis_healthy = True
+
+async def redis_call(awaitable):
+    """Run one Redis command with a timeout."""
+    return await asyncio.wait_for(awaitable, timeout=REDIS_OP_TIMEOUT_SECONDS)
+
+async def redis_ready() -> bool:
+    """
+    True if Redis should be used for this request.
+    Pings Redis on first use and again once the failure cooldown has passed.
+    """
+    if not redis_client:
+        return False
+    if redis_healthy:
+        return True
+    if redis_healthy is False and time.monotonic() - redis_last_failure_at < REDIS_FAILURE_COOLDOWN_SECONDS:
+        return False
+    try:
+        await redis_call(redis_client.ping())
+        mark_redis_success()
+        return True
+    except Exception as e:
+        mark_redis_failure("health check", e)
+        return False
+
+async def current_store_mode() -> str:
+    return "redis" if await redis_ready() else "memory"
 
 # Pydantic models
 class InitiateSessionRequest(BaseModel):
@@ -312,58 +394,102 @@ def deserialize_session(raw_session: Any) -> Optional[Dict[str, Any]]:
             session_data[field] = datetime.fromisoformat(session_data[field])
     return session_data
 
-async def prune_expired_session_index():
-    expires_before = int((utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)).timestamp())
+def memory_session_expired(session_data: Dict[str, Any]) -> bool:
+    return session_data["last_activity"] < utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)
 
-    if redis_client:
-        await redis_client.zremrangebyscore(SESSION_INDEX_KEY, 0, expires_before)
-        return
-
+def prune_memory_sessions():
     expired_session_ids = [
         session_id for session_id, session_data in sessions.items()
-        if session_data["last_activity"] < utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)
+        if memory_session_expired(session_data)
     ]
     for session_id in expired_session_ids:
-        del sessions[session_id]
+        sessions.pop(session_id, None)
 
-async def save_session(session_id: str, session_data: Dict[str, Any]):
-    session_data["last_activity"] = utc_now()
-
-    if redis_client:
-        serialized = serialize_session(session_data)
-        await redis_client.set(session_key(session_id), serialized, ex=SESSION_TTL_SECONDS)
-        await redis_client.zadd(SESSION_INDEX_KEY, {session_id: int(session_data["last_activity"].timestamp())})
-        return
-
-    sessions[session_id] = session_data
-
-async def get_session(session_id: str, refresh_ttl: bool = False) -> Optional[Dict[str, Any]]:
-    if redis_client:
-        raw_session = await redis_client.get(session_key(session_id))
-        session_data = deserialize_session(raw_session)
-        if session_data and refresh_ttl:
-            await save_session(session_id, session_data)
-        return session_data
-
+def get_memory_session(session_id: str, refresh_ttl: bool = False) -> Optional[Dict[str, Any]]:
     session_data = sessions.get(session_id)
     if not session_data:
         return None
-
-    if session_data["last_activity"] < utc_now() - timedelta(seconds=SESSION_TTL_SECONDS):
-        del sessions[session_id]
+    if memory_session_expired(session_data):
+        sessions.pop(session_id, None)
         return None
-
     if refresh_ttl:
         session_data["last_activity"] = utc_now()
     return session_data
 
-async def delete_session(session_id: str):
-    if redis_client:
-        await redis_client.delete(session_key(session_id))
-        await redis_client.zrem(SESSION_INDEX_KEY, session_id)
-        return
+async def prune_expired_session_index():
+    """Best-effort cleanup. Never raises."""
+    prune_memory_sessions()
 
+    if not await redis_ready():
+        return
+    expires_before = int((utc_now() - timedelta(seconds=SESSION_TTL_SECONDS)).timestamp())
+    try:
+        await redis_call(redis_client.zremrangebyscore(SESSION_INDEX_KEY, 0, expires_before))
+        mark_redis_success()
+    except Exception as e:
+        mark_redis_failure("prune", e)
+
+async def save_session(session_id: str, session_data: Dict[str, Any]):
+    session_data["last_activity"] = utc_now()
+
+    if await redis_ready():
+        try:
+            serialized = serialize_session(session_data)
+            await redis_call(redis_client.set(session_key(session_id), serialized, ex=SESSION_TTL_SECONDS))
+            await redis_call(redis_client.zadd(SESSION_INDEX_KEY, {session_id: int(session_data["last_activity"].timestamp())}))
+            mark_redis_success()
+            # Session now lives in Redis; drop any copy made while Redis was down.
+            sessions.pop(session_id, None)
+            return
+        except Exception as e:
+            mark_redis_failure("save_session", e)
+
+    sessions[session_id] = session_data
+
+async def get_session(session_id: str, refresh_ttl: bool = False) -> Optional[Dict[str, Any]]:
+    if await redis_ready():
+        try:
+            raw_session = await redis_call(redis_client.get(session_key(session_id)))
+            mark_redis_success()
+        except Exception as e:
+            mark_redis_failure("get_session", e)
+            raw_session = None
+        else:
+            try:
+                session_data = deserialize_session(raw_session)
+            except (ValueError, TypeError) as e:
+                logger.warning(f"Stored session {session_id[:8]}... is unreadable ({type(e).__name__})")
+                session_data = None
+            if session_data:
+                if refresh_ttl:
+                    await save_session(session_id, session_data)
+                return session_data
+
+    # Not in Redis (or Redis is down): the session may have been created in
+    # memory during an outage on this instance.
+    return get_memory_session(session_id, refresh_ttl=refresh_ttl)
+
+async def delete_session(session_id: str):
     sessions.pop(session_id, None)
+
+    if not await redis_ready():
+        return
+    try:
+        await redis_call(redis_client.delete(session_key(session_id)))
+        await redis_call(redis_client.zrem(SESSION_INDEX_KEY, session_id))
+        mark_redis_success()
+    except Exception as e:
+        mark_redis_failure("delete_session", e)
+
+async def count_active_sessions() -> int:
+    if await redis_ready():
+        try:
+            count = await redis_call(redis_client.zcard(SESSION_INDEX_KEY))
+            mark_redis_success()
+            return int(count) + len(sessions)
+        except Exception as e:
+            mark_redis_failure("count_active_sessions", e)
+    return len(sessions)
 
 # Session management
 async def create_session(username: str, additional_prompt: str = None) -> str:
@@ -413,9 +539,12 @@ async def validate_session(credentials: HTTPAuthorizationCredentials = Depends(s
     return session_id
 
 async def cleanup_expired_sessions():
-    """Clean up sessions older than 24 hours"""
-    await prune_expired_session_index()
-    logger.debug("Session cleanup complete")
+    """Clean up sessions older than 24 hours. Best-effort: never blocks a request."""
+    try:
+        await prune_expired_session_index()
+        logger.debug("Session cleanup complete")
+    except Exception as e:
+        logger.warning(f"Session cleanup skipped ({type(e).__name__})")
 
 # API Endpoints
 @app.get("/")
@@ -426,8 +555,38 @@ async def root():
         "status": "Ready for awesome conversations!",
         "version": app_version,
         "openai_api_key_status": "configured" if api_key else "missing",
-        "openai_client_status": "initialized" if client else "failed"
+        "openai_client_status": "initialized" if client else "failed",
+        "session_store": await current_store_mode()
     }
+
+@app.get("/cron/keepalive", include_in_schema=False)
+async def cron_keepalive(authorization: Optional[str] = Header(default=None)):
+    """
+    Daily Vercel cron. Touches Redis so Upstash doesn't archive the free DB
+    for inactivity. Vercel sends "Authorization: Bearer <CRON_SECRET>".
+    """
+    cron_secret = os.getenv("CRON_SECRET")
+    if not cron_secret or not hmac.compare_digest(
+        (authorization or "").encode(), f"Bearer {cron_secret}".encode()
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Unauthorized"
+        )
+
+    if not redis_client:
+        logger.warning("Keepalive: Redis is not configured")
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"ok": False})
+
+    # Always try, even during the failure cooldown: this is the call that keeps the DB alive.
+    try:
+        await redis_call(redis_client.set(KEEPALIVE_KEY, utc_now().isoformat(), ex=KEEPALIVE_TTL_SECONDS))
+        mark_redis_success()
+        logger.info("Keepalive: Redis OK")
+        return {"ok": True}
+    except Exception as e:
+        mark_redis_failure("keepalive", e)
+        return JSONResponse(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, content={"ok": False})
 
 @app.get("/redoc", include_in_schema=False)
 async def redoc_docs():
@@ -522,7 +681,7 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
 
     if not client:
         logger.error("OpenAI client is not initialized")
-        error_response = "Oops! I'm having a little trouble right now. Can you try again later? ðŸ¤–"
+        error_response = "Oops! I'm having a little trouble right now. Can you try again later? 🤖"
         session_data["messages"].append({
             "role": "assistant",
             "content": error_response
@@ -632,10 +791,7 @@ async def get_active_sessions():
     Get count of active sessions (for monitoring)
     """
     await cleanup_expired_sessions()
-    if redis_client:
-        active_sessions = await redis_client.zcard(SESSION_INDEX_KEY)
-    else:
-        active_sessions = len(sessions)
+    active_sessions = await count_active_sessions()
 
     return {
         "active_sessions": active_sessions
@@ -674,48 +830,6 @@ async def get_conversation_starters():
         "conversation_starters": selected_starters,
         "message": "Here are some fun things we can chat about! 🌟"
     }
-
-@app.get("/debug/env-check")
-async def debug_environment():
-    """
-    Debug endpoint to check environment variable status
-    """
-    if os.getenv("ENABLE_DEBUG_ENDPOINTS", "").lower() != "true":
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="Not found"
-        )
-
-    raw_api_key = os.getenv("OPENAI_API_KEY")
-    parsed_api_key = parse_openai_api_key(raw_api_key) if raw_api_key else None
-    
-    env_info = {
-        "openai_api_key_raw_present": bool(raw_api_key),
-        "openai_api_key_raw_length": len(raw_api_key) if raw_api_key else 0,
-        "openai_api_key_parsed_present": bool(parsed_api_key),
-        "openai_api_key_parsed_length": len(parsed_api_key) if parsed_api_key else 0,
-        "openai_api_key_format_valid": parsed_api_key.startswith("sk-") if parsed_api_key else False,
-        "openai_client_initialized": client is not None,
-        "port": os.getenv("PORT", "not_set"),
-        "python_path": os.getenv("PYTHONPATH", "not_set"),
-        "session_store_backend": session_store_backend,
-        "environment_variables_with_key_or_api": [
-            key for key in os.environ.keys() 
-            if any(word in key.upper() for word in ['OPENAI', 'API', 'KEY'])
-        ]
-    }
-    
-    # Add format detection
-    if raw_api_key:
-        # Detect format
-        if raw_api_key.strip().startswith("sk-"):
-            env_info["detected_format"] = "plain_text"
-        elif raw_api_key.strip().startswith("{"):
-            env_info["detected_format"] = "json"
-        else:
-            env_info["detected_format"] = "unknown"
-    
-    return env_info
 
 @app.get("/filter-info", response_model=FilterInfoResponse)
 async def get_filter_info():

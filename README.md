@@ -43,7 +43,7 @@ UPSTASH_REDIS_REST_TOKEN=your_upstash_redis_rest_token
 ALLOWED_ORIGINS=*
 ```
 
-`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are required for durable sessions on Vercel. If they are absent, the app falls back to in-memory sessions for legacy local/Docker/App Runner usage.
+`UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are required for durable sessions on Vercel. If they are not set, the app tries `UPSTASH2_KV_REST_API_URL`/`UPSTASH2_KV_REST_API_TOKEN`, then `KV_REST_API_URL`/`KV_REST_API_TOKEN`. If none are set, it uses in-memory sessions (fine for local/Docker/App Runner usage).
 
 ### 3. Run Application
 ```bash
@@ -61,10 +61,10 @@ This project now supports Vercel's native Python/FastAPI runtime.
    - `UPSTASH_REDIS_REST_URL`
    - `UPSTASH_REDIS_REST_TOKEN`
    - `ALLOWED_ORIGINS` (optional, comma-separated; defaults to `*`)
-   - `ENABLE_DEBUG_ENDPOINTS` (optional; keep unset in production)
+   - `CRON_SECRET` (any long random string; protects `/cron/keepalive`)
 4. Deploy with Vercel.
 
-The Vercel config targets the Singapore region (`sin1`) in `vercel.json`. `pyproject.toml` points Vercel at the FastAPI app entrypoint (`main:app`) through `[project.scripts]`, pins Python 3.12, and mirrors the deployment dependencies.
+The Vercel config targets the Singapore region (`sin1`) in `vercel.json` and schedules a daily keep-alive cron (see below). `pyproject.toml` points Vercel at the FastAPI app entrypoint (`main:app`) through `[project.scripts]`, pins Python 3.12, and mirrors the deployment dependencies.
 
 ### 5. AWS App Runner Deployment [legacy]
 For AWS App Runner deployment, the app is already configured with:
@@ -117,15 +117,11 @@ docker run -p 8080:8080 \
 | POST | `/session/add-prompt` | Add custom session prompt (requires auth) |
 | GET | `/session/prompt-info` | Get session prompt details (requires auth) |
 
-### Debug Endpoints
+### Keep-alive Cron
 
-`GET /debug/env-check` is disabled by default and returns 404. Enable it only for temporary troubleshooting by setting:
+`GET /cron/keepalive` writes a short-lived `keepalive` key to Redis so Upstash does not archive the free database for inactivity. Vercel calls it daily at 03:00 UTC (`crons` in `vercel.json`).
 
-```env
-ENABLE_DEBUG_ENDPOINTS=true
-```
-
-The endpoint reports configuration status only and does not return API key previews.
+It requires `Authorization: Bearer <CRON_SECRET>`, which Vercel sends automatically when the `CRON_SECRET` environment variable is set. Without a matching header it returns 401. It returns `{"ok": true}` when Redis responds, or HTTP 503 with `{"ok": false}` when it does not, so failed runs show up in the Vercel cron logs.
 
 ## Authentication
 
@@ -225,7 +221,11 @@ UPSTASH_REDIS_REST_TOKEN=your_upstash_redis_rest_token
 
 Each session is stored as `session:{session_id}` with a 24-hour TTL. Active session IDs are tracked in `sessions:index` so `/sessions/active` can count sessions without scanning every key.
 
-If Upstash is not configured, the app uses in-memory session storage as a legacy fallback. That fallback is not reliable on Vercel because serverless instances can cold start or scale independently.
+If Upstash is not configured, or a Redis call fails or takes longer than 3 seconds, the app logs a warning and uses an in-memory session store with the same 24-hour expiry. After a failure it skips Redis for 60 seconds, so requests don't keep waiting on a dead database, then tries again. Redis errors never turn into a 500.
+
+`GET /` reports the current mode as `"session_store": "redis"` or `"memory"`.
+
+Memory mode is a fallback only: sessions are lost when an instance cold starts and are not shared between instances, so a user may need to start a new session.
 
 ### Redis Data Purge
 
@@ -243,7 +243,7 @@ Delete all `session:*` keys and `sessions:index`:
 python scripts/purge_redis_sessions.py --confirm
 ```
 
-The purge script requires `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` in the environment. No public HTTP purge endpoint is exposed.
+The purge script reads the same Redis environment variables as the app. No public HTTP purge endpoint is exposed.
 
 ## Project Structure
 
@@ -252,7 +252,7 @@ gpt-for-kids-backend/
 |-- main.py                         # FastAPI application
 |-- requirements.txt                # Dependencies
 |-- pyproject.toml                  # Vercel Python runtime config
-|-- vercel.json                     # Vercel region config
+|-- vercel.json                     # Vercel region and cron config
 |-- scripts/purge_redis_sessions.py # Redis session purge utility
 |-- Dockerfile                      # Legacy App Runner/container config
 |-- apprunner.yaml                  # Legacy App Runner config
@@ -271,7 +271,8 @@ gpt-for-kids-backend/
 
 - **Sessions**: Upstash Redis storage with 24-hour expiration on Vercel
 - **API Keys**: Secure storage, never commit to version control
-- **Debugging**: Debug environment endpoint disabled by default
+- **Errors**: Client error messages are generic; exception details stay in server logs
+- **Cron**: `/cron/keepalive` is protected by `CRON_SECRET`
 
 **TODO**: :
    - Implementing rate limiting
