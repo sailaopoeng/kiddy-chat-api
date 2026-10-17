@@ -1,4 +1,5 @@
 import asyncio
+import hashlib
 import hmac
 import os
 import time
@@ -10,12 +11,12 @@ import json
 from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List
 
-from fastapi import FastAPI, HTTPException, Depends, Header, status
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Depends, Header, Request, status
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 import openai
 
@@ -52,6 +53,28 @@ load_dotenv()
 SESSION_TTL_SECONDS = 24 * 60 * 60
 SESSION_INDEX_KEY = "sessions:index"
 SESSION_KEY_PREFIX = "session:"
+
+OPENAI_MODEL = "gpt-5.6-luna"
+# GPT-5.x models reject max_tokens/temperature/penalties.
+# Budget includes hidden reasoning tokens, so keep it generous;
+# reply length is kept short by the system prompt.
+MAX_COMPLETION_TOKENS = 1000
+
+# Input size limits (longer requests get HTTP 422)
+MAX_USERNAME_LENGTH = 50
+MAX_MESSAGE_LENGTH = 2000
+MAX_ADDITIONAL_PROMPT_LENGTH = 2000
+
+# Messages allowed per session per minute. 0 turns the limit off.
+QUERY_RATE_LIMIT_PER_MINUTE = int(os.getenv("QUERY_RATE_LIMIT_PER_MINUTE", "20"))
+
+# Grown-up PIN (optional). When PARENT_PIN is set, changing a session's
+# instructions needs either a short-lived parent token (from /parent/verify)
+# or instructions that were approved with the PIN before (their signature).
+PARENT_TOKEN_TTL_SECONDS = 15 * 60
+PIN_MAX_FAILURES_PER_CLIENT = 5
+PIN_MAX_FAILURES_TOTAL = 30
+PIN_LOCKOUT_SECONDS = 15 * 60
 
 def parse_openai_api_key(raw_key: str) -> Optional[str]:
     """
@@ -169,11 +192,39 @@ else:
     api_key = None
 
 try:
-    client = openai.OpenAI(api_key=api_key)
+    # Async client so a slow OpenAI call doesn't block other requests.
+    client = openai.AsyncOpenAI(api_key=api_key)
     logger.info("OpenAI client initialized successfully")
 except Exception as e:
     logger.error(f"Failed to initialize OpenAI client: {e}")
     client = None
+
+# Grown-up PIN setup
+parent_pin: Optional[str] = (os.getenv("PARENT_PIN") or "").strip() or None
+
+def build_parent_signing_key() -> Optional[bytes]:
+    """
+    Key for signing parent tokens and approved instructions.
+    Uses PARENT_SIGNING_SECRET when set; otherwise it is derived from the PIN and
+    the OpenAI key, so it is stable across instances without extra setup.
+    Changing either one makes earlier approvals invalid.
+    """
+    if not parent_pin:
+        return None
+    secret = os.getenv("PARENT_SIGNING_SECRET")
+    if secret:
+        return secret.encode()
+    if not api_key:
+        logger.warning("PARENT_PIN is set without PARENT_SIGNING_SECRET or OPENAI_API_KEY; set PARENT_SIGNING_SECRET")
+    return hashlib.sha256(f"kiddy-parent-v1|{parent_pin}|{api_key or ''}".encode()).digest()
+
+parent_signing_key = build_parent_signing_key()
+if parent_pin:
+    logger.info("Grown-up PIN is enabled for changing session instructions")
+    if len(parent_pin) < 6:
+        logger.warning("PARENT_PIN is shorter than 6 characters; a longer PIN is harder to guess")
+else:
+    logger.info("PARENT_PIN not set; anyone with a session can change its instructions")
 
 # Security
 security = HTTPBearer()
@@ -272,7 +323,7 @@ async def current_store_mode() -> str:
 
 # Pydantic models
 class InitiateSessionRequest(BaseModel):
-    username: str
+    username: str = Field(max_length=MAX_USERNAME_LENGTH)
 
 class InitiateSessionResponse(BaseModel):
     session_id: str
@@ -280,7 +331,7 @@ class InitiateSessionResponse(BaseModel):
     username: str
 
 class QueryRequest(BaseModel):
-    message: str
+    message: str = Field(max_length=MAX_MESSAGE_LENGTH)
 
 class QueryResponse(BaseModel):
     response: str
@@ -292,12 +343,27 @@ class ChatMessage(BaseModel):
     content: str
 
 class AddPromptRequest(BaseModel):
-    additional_prompt: str
+    additional_prompt: str = Field(max_length=MAX_ADDITIONAL_PROMPT_LENGTH)
+    # Signature returned by an earlier PIN-approved save of the same text.
+    signature: Optional[str] = Field(default=None, max_length=128)
 
 class AddPromptResponse(BaseModel):
     message: str
     session_id: str
     additional_prompt: str
+    # Present when the grown-up PIN is enabled. Send it back with the same
+    # text to apply the instructions to a new session without the PIN.
+    signature: Optional[str] = None
+
+class ParentStatusResponse(BaseModel):
+    pin_required: bool
+
+class ParentVerifyRequest(BaseModel):
+    pin: str = Field(max_length=64)
+
+class ParentVerifyResponse(BaseModel):
+    parent_token: str
+    expires_in: int
 
 class FilterInfoResponse(BaseModel):
     inappropriate_words: List[str]
@@ -491,6 +557,107 @@ async def count_active_sessions() -> int:
             mark_redis_failure("count_active_sessions", e)
     return len(sessions)
 
+# Counters for rate limits and PIN lockouts. Stored in Redis when available
+# (shared by all instances), otherwise in memory on this instance.
+COUNTER_KEY_PREFIX = "counter:"
+MAX_MEMORY_COUNTERS = 10000
+memory_counters: Dict[str, tuple] = {}  # key -> (count, resets_at monotonic time)
+
+def prune_memory_counters():
+    now = time.monotonic()
+    for key in [k for k, (_, resets_at) in memory_counters.items() if resets_at <= now]:
+        memory_counters.pop(key, None)
+
+async def increment_counter(name: str, window_seconds: int) -> int:
+    """Add one to a counter that resets window_seconds after its first hit. Returns the new count."""
+    key = f"{COUNTER_KEY_PREFIX}{name}"
+    if await redis_ready():
+        try:
+            count = int(await redis_call(redis_client.incr(key)))
+            if count == 1:
+                await redis_call(redis_client.expire(key, window_seconds))
+            mark_redis_success()
+            return count
+        except Exception as e:
+            mark_redis_failure("increment_counter", e)
+
+    now = time.monotonic()
+    count, resets_at = memory_counters.get(key, (0, now + window_seconds))
+    if resets_at <= now:
+        count, resets_at = 0, now + window_seconds
+    memory_counters[key] = (count + 1, resets_at)
+    if len(memory_counters) > MAX_MEMORY_COUNTERS:
+        prune_memory_counters()
+    return count + 1
+
+async def read_counter(name: str) -> int:
+    key = f"{COUNTER_KEY_PREFIX}{name}"
+    if await redis_ready():
+        try:
+            value = await redis_call(redis_client.get(key))
+            mark_redis_success()
+            return int(value or 0)
+        except Exception as e:
+            mark_redis_failure("read_counter", e)
+
+    count, resets_at = memory_counters.get(key, (0, 0))
+    return count if resets_at > time.monotonic() else 0
+
+async def reset_counter(name: str):
+    key = f"{COUNTER_KEY_PREFIX}{name}"
+    memory_counters.pop(key, None)
+    if await redis_ready():
+        try:
+            await redis_call(redis_client.delete(key))
+            mark_redis_success()
+        except Exception as e:
+            mark_redis_failure("reset_counter", e)
+
+async def enforce_query_rate_limit(session_id: str):
+    if QUERY_RATE_LIMIT_PER_MINUTE <= 0:
+        return
+    count = await increment_counter(f"query:{session_id}", 60)
+    if count > QUERY_RATE_LIMIT_PER_MINUTE:
+        logger.warning(f"Rate limit hit for session {session_id[:8]}...")
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many messages. Please slow down a little."
+        )
+
+# Grown-up PIN helpers
+def sign_value(purpose: str, value: str) -> str:
+    return hmac.new(parent_signing_key, f"{purpose}:{value}".encode(), hashlib.sha256).hexdigest()
+
+def same_secret(given: Optional[str], expected: str) -> bool:
+    """Constant-time comparison that also copes with non-ASCII input."""
+    if given is None:
+        return False
+    return hmac.compare_digest(given.encode("utf-8", "surrogatepass"), expected.encode())
+
+def create_parent_token() -> str:
+    expires_at = str(int(time.time()) + PARENT_TOKEN_TTL_SECONDS)
+    return f"{expires_at}.{sign_value('parent-token', expires_at)}"
+
+def is_valid_parent_token(token: Optional[str]) -> bool:
+    if not parent_signing_key or not token:
+        return False
+    expires_at, _, signature = token.partition(".")
+    if not expires_at.isdigit() or not signature:
+        return False
+    if int(expires_at) < time.time():
+        return False
+    return same_secret(signature, sign_value("parent-token", expires_at))
+
+def sign_instructions(text: str) -> str:
+    return sign_value("instructions", text)
+
+def client_address(request: Request) -> str:
+    # Hosting platforms (Vercel, App Runner) put the caller's address first.
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        return forwarded.split(",")[0].strip()
+    return request.client.host if request.client else "unknown"
+
 # Session management
 async def create_session(username: str, additional_prompt: str = None) -> str:
     """Create a new session for a user with optional additional prompt"""
@@ -545,6 +712,81 @@ async def cleanup_expired_sessions():
         logger.debug("Session cleanup complete")
     except Exception as e:
         logger.warning(f"Session cleanup skipped ({type(e).__name__})")
+
+# Query handling shared by /query and /query/stream
+SAFE_REPLACEMENT_MESSAGE = "I want to make sure I'm being helpful and appropriate. Let me think of a better way to answer that! What else would you like to know? 😊"
+NO_CLIENT_MESSAGE = "Oops! I'm having a little trouble right now. Can you try again later? 🤖"
+AI_ERROR_MESSAGE = "Oops! I'm having a little trouble right now. Can you try asking me something else? 🤖"
+
+async def start_query(session_id: str, message: str):
+    """
+    Validate the request, apply the rate limit and input filter, and add the
+    child's message to the history.
+    Returns (session_data, username, canned_reply). canned_reply is set when the
+    AI should not be called (filtered input or no OpenAI client).
+    """
+    if not message.strip():
+        logger.warning(f"Empty message provided in query request for session: {session_id[:8]}...")
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Message cannot be empty"
+        )
+
+    await enforce_query_rate_limit(session_id)
+
+    session_data = await get_session(session_id)
+    if not session_data:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid session ID"
+        )
+
+    username = session_data["username"]
+    logger.info(f"Processing query for user {username} (session: {session_id[:8]}...): {message[:50]}...")
+
+    # The message is kept in history for context even when it is filtered,
+    # but filtered messages are never sent to OpenAI.
+    session_data["messages"].append({"role": "user", "content": message})
+
+    if contains_inappropriate_content(message):
+        logger.warning(f"Inappropriate content detected from user {username}: {message[:30]}...")
+        return session_data, username, get_kid_friendly_response()
+
+    if not client:
+        logger.error("OpenAI client is not initialized")
+        return session_data, username, NO_CLIENT_MESSAGE
+
+    return session_data, username, None
+
+async def finish_query(session_id: str, session_data: Dict[str, Any], reply: str):
+    session_data["messages"].append({"role": "assistant", "content": reply})
+    await save_session(session_id, session_data)
+
+def checked_reply(username: str, reply: Optional[str]) -> str:
+    """Final safety check on a complete AI reply."""
+    if not reply or not reply.strip():
+        return AI_ERROR_MESSAGE
+    if contains_inappropriate_content(reply):
+        logger.warning(f"Inappropriate content detected in AI response for user {username}")
+        return SAFE_REPLACEMENT_MESSAGE
+    return reply
+
+# A sentence ends at . ! ? or … followed by whitespace, or at a line break.
+SENTENCE_END = re.compile(r"[.!?…](?=\s)|\n")
+
+def safe_stream_boundary(text: str) -> int:
+    """
+    Length of the part of text made of complete sentences. Streaming only sends
+    complete sentences, so the word filter never sees half a word and a child
+    never sees a blocked word before the reply is replaced.
+    """
+    boundary = 0
+    for match in SENTENCE_END.finditer(text):
+        boundary = match.end()
+    return boundary
+
+def sse_event(event: str, data: Dict[str, Any]) -> str:
+    return f"event: {event}\ndata: {json.dumps(data)}\n\n"
 
 # API Endpoints
 @app.get("/")
@@ -631,118 +873,92 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
     Send a message to GPT and get a kid-friendly response
     Requires valid session ID in Authorization header as Bearer token
     """
-    if not request.message.strip():
-        logger.warning(f"Empty message provided in query request for session: {session_id}")
-        raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Message cannot be empty"
-        )
-    
-    session_data = await get_session(session_id)
-    if not session_data:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid session ID"
-        )
+    session_data, username, reply = await start_query(session_id, request.message)
 
-    username = session_data["username"]
-    
-    logger.info(f"Processing query for user {username} (session: {session_id[:8]}...): {request.message[:50]}...")
-    
-    # Check for inappropriate content
-    if contains_inappropriate_content(request.message):
-        logger.warning(f"Inappropriate content detected from user {username}: {request.message[:30]}...")
-        kid_friendly_response = get_kid_friendly_response()
-        
-        # Still add the user message to history for context, but don't send to OpenAI
-        session_data["messages"].append({
-            "role": "user",
-            "content": request.message
-        })
-        
-        # Add the kid-friendly response
-        session_data["messages"].append({
-            "role": "assistant",
-            "content": kid_friendly_response
-        })
-        await save_session(session_id, session_data)
-        
-        return QueryResponse(
-            response=kid_friendly_response,
-            session_id=session_id,
-            username=username
-        )
-    
-    # Add user message to session history
-    session_data["messages"].append({
-        "role": "user",
-        "content": request.message
-    })
+    if reply is None:
+        try:
+            logger.info(f"Sending request to OpenAI for user {username}")
+            response = await client.chat.completions.create(
+                model=OPENAI_MODEL,
+                messages=session_data["messages"],
+                max_completion_tokens=MAX_COMPLETION_TOKENS,
+            )
+            reply = checked_reply(username, response.choices[0].message.content)
+            logger.info(f"Received response from OpenAI for user {username}: {reply[:50]}...")
+        except Exception as e:
+            logger.error(f"Error processing OpenAI request for user {username}: {str(e)}")
+            reply = AI_ERROR_MESSAGE
 
-    if not client:
-        logger.error("OpenAI client is not initialized")
-        error_response = "Oops! I'm having a little trouble right now. Can you try again later? 🤖"
-        session_data["messages"].append({
-            "role": "assistant",
-            "content": error_response
-        })
-        await save_session(session_id, session_data)
-        return QueryResponse(
-            response=error_response,
-            session_id=session_id,
-            username=username
-        )
-    
-    try:
-        logger.info(f"Sending request to OpenAI for user {username}")
-        # Create OpenAI chat completion with kid-friendly model
-        response = client.chat.completions.create(
-            model="gpt-5.6-luna",
-            messages=session_data["messages"],
-            # GPT-5.x models reject max_tokens/temperature/penalties.
-            # Budget includes hidden reasoning tokens, so keep it generous;
-            # reply length is kept short by the system prompt.
-            max_completion_tokens=1000,
-        )
-        
-        # Extract assistant response
-        assistant_message = response.choices[0].message.content
-        logger.info(f"Received response from OpenAI for user {username}: {assistant_message[:50]}...")
-        
-        # Additional safety check on AI response
-        if contains_inappropriate_content(assistant_message):
-            logger.warning(f"Inappropriate content detected in AI response for user {username}")
-            assistant_message = "I want to make sure I'm being helpful and appropriate. Let me think of a better way to answer that! What else would you like to know? 😊"
-        
-        # Add assistant response to session history
-        session_data["messages"].append({
-            "role": "assistant",
-            "content": assistant_message
-        })
-        await save_session(session_id, session_data)
-        
-        return QueryResponse(
-            response=assistant_message,
-            session_id=session_id,
-            username=username
-        )
-        
-    except Exception as e:
-        logger.error(f"Error processing OpenAI request for user {username}: {str(e)}")
-        # Kid-friendly error message
-        error_response = "Oops! I'm having a little trouble right now. Can you try asking me something else? 🤖"
-        
-        session_data["messages"].append({
-            "role": "assistant",
-            "content": error_response
-        })
-        await save_session(session_id, session_data)
-        
-        return QueryResponse(
-            response=error_response,
-            session_id=session_id,
-            username=username
-        )
+    await finish_query(session_id, session_data, reply)
+
+    return QueryResponse(
+        response=reply,
+        session_id=session_id,
+        username=username
+    )
+
+@app.post("/query/stream")
+async def query_stream(request: QueryRequest, session_id: str = Depends(validate_session)):
+    """
+    Like /query, but streams the reply as Server-Sent Events:
+    - `delta` events carry {"text": ...} with the next complete sentences
+    - one final `done` event carries {"response", "session_id", "username"}
+
+    The `done` response is the reply to keep. It can differ from the deltas
+    when the safety check replaced the reply, so clients should show it.
+    """
+    session_data, username, canned_reply = await start_query(session_id, request.message)
+
+    async def events():
+        reply = canned_reply
+        if reply is None:
+            full_text = ""
+            sent = 0
+            blocked = False
+            stream = None
+            try:
+                logger.info(f"Streaming request to OpenAI for user {username}")
+                stream = await client.chat.completions.create(
+                    model=OPENAI_MODEL,
+                    messages=session_data["messages"],
+                    max_completion_tokens=MAX_COMPLETION_TOKENS,
+                    stream=True,
+                )
+                async for chunk in stream:
+                    if not chunk.choices:
+                        continue
+                    delta = chunk.choices[0].delta.content
+                    if not delta:
+                        continue
+                    full_text += delta
+                    boundary = safe_stream_boundary(full_text)
+                    if boundary > sent:
+                        if contains_inappropriate_content(full_text[:boundary]):
+                            blocked = True
+                            break
+                        yield sse_event("delta", {"text": full_text[sent:boundary]})
+                        sent = boundary
+                reply = SAFE_REPLACEMENT_MESSAGE if blocked else checked_reply(username, full_text)
+                if blocked:
+                    logger.warning(f"Inappropriate content detected in streamed AI response for user {username}")
+            except Exception as e:
+                logger.error(f"Error streaming OpenAI request for user {username}: {str(e)}")
+                reply = AI_ERROR_MESSAGE
+            finally:
+                if stream is not None:
+                    try:
+                        await stream.close()
+                    except Exception:
+                        pass
+
+        await finish_query(session_id, session_data, reply)
+        yield sse_event("done", {"response": reply, "session_id": session_id, "username": username})
+
+    return StreamingResponse(
+        events(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
 @app.get("/session/{session_id}/history")
 async def get_session_history(session_id: str, auth_session_id: str = Depends(validate_session)):
@@ -843,32 +1059,98 @@ async def get_filter_info():
         default_system_prompt=get_kids_system_prompt()
     )
 
+@app.get("/parent/status", response_model=ParentStatusResponse)
+async def parent_status():
+    """
+    Whether a grown-up PIN is needed to change session instructions
+    """
+    return ParentStatusResponse(pin_required=parent_pin is not None)
+
+@app.post("/parent/verify", response_model=ParentVerifyResponse)
+async def verify_parent_pin(body: ParentVerifyRequest, request: Request):
+    """
+    Check the grown-up PIN and return a short-lived parent token.
+    Send it as the X-Parent-Token header to /session/add-prompt.
+    Too many wrong PINs lock verification for a while (HTTP 429).
+    """
+    if not parent_pin:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No grown-up PIN is configured"
+        )
+
+    client_key = f"pin-fail:{client_address(request)}"
+    total_key = "pin-fail:all"
+    if (
+        await read_counter(client_key) >= PIN_MAX_FAILURES_PER_CLIENT
+        or await read_counter(total_key) >= PIN_MAX_FAILURES_TOTAL
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Too many wrong PINs. Please try again later."
+        )
+
+    if not same_secret(body.pin.strip(), parent_pin):
+        await increment_counter(client_key, PIN_LOCKOUT_SECONDS)
+        await increment_counter(total_key, PIN_LOCKOUT_SECONDS)
+        logger.warning("Wrong grown-up PIN entered")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Wrong PIN"
+        )
+
+    await reset_counter(client_key)
+    return ParentVerifyResponse(
+        parent_token=create_parent_token(),
+        expires_in=PARENT_TOKEN_TTL_SECONDS
+    )
+
 @app.post("/session/add-prompt", response_model=AddPromptResponse)
-async def add_session_prompt(request: AddPromptRequest, session_id: str = Depends(validate_session)):
+async def add_session_prompt(
+    request: AddPromptRequest,
+    session_id: str = Depends(validate_session),
+    x_parent_token: Optional[str] = Header(default=None),
+):
     """
     Add an additional prompt to the current session (appends to default prompt)
     This allows frontend to customize behavior without overwriting safety defaults
+
+    When PARENT_PIN is set, this also needs either an X-Parent-Token header from
+    /parent/verify, or the `signature` returned by an earlier approved save of
+    the same text (so saved instructions can be applied to new sessions).
     """
-    if not request.additional_prompt.strip():
+    additional_prompt = request.additional_prompt.strip()
+    if not additional_prompt:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail="Additional prompt cannot be empty"
         )
-    
+
+    signature = None
+    if parent_pin:
+        signature = sign_instructions(additional_prompt)
+        approved = is_valid_parent_token(x_parent_token) or same_secret(request.signature, signature)
+        if not approved:
+            logger.warning(f"Unapproved instructions change rejected for session {session_id[:8]}...")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="A grown-up PIN is needed to change the instructions"
+            )
+
     session_data = await get_session(session_id)
     if not session_data:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid session ID"
         )
-    
+
     # Update the additional prompt for this session
-    session_data["additional_prompt"] = request.additional_prompt
-    
+    session_data["additional_prompt"] = additional_prompt
+
     # Rebuild the system prompt with the additional instruction
     base_prompt = get_kids_system_prompt()
-    combined_prompt = f"{base_prompt}\n\nAdditional instructions for this session: {request.additional_prompt}"
-    
+    combined_prompt = f"{base_prompt}\n\nAdditional instructions for this session: {additional_prompt}"
+
     # Update the system message in the conversation history
     if session_data["messages"] and session_data["messages"][0]["role"] == "system":
         session_data["messages"][0]["content"] = combined_prompt
@@ -880,11 +1162,12 @@ async def add_session_prompt(request: AddPromptRequest, session_id: str = Depend
         })
 
     await save_session(session_id, session_data)
-    
+
     return AddPromptResponse(
         message="Additional prompt added successfully! This will guide our conversation while keeping all safety features active.",
         session_id=session_id,
-        additional_prompt=request.additional_prompt
+        additional_prompt=additional_prompt,
+        signature=signature
     )
 
 @app.get("/session/prompt-info")

@@ -1,6 +1,6 @@
 # Kiddy Chat API
 
-A safe and fun FastAPI-based chat application designed specifically for kids! This app integrates with OpenAI's GPT-4o-mini model and includes comprehensive content filtering to ensure age-appropriate conversations.
+A safe and fun FastAPI-based chat application designed specifically for kids! This app integrates with OpenAI and includes comprehensive content filtering to ensure age-appropriate conversations.
 
 ## Live Demo
 You can try the live demo at [Kiddy Chat API Demo](https://kiddy-chat-api.sailaopoeng.com/docs).
@@ -10,11 +10,13 @@ You can try the live demo at [Kiddy Chat API Demo](https://kiddy-chat-api.sailao
 ### Safety Features
 - **Content Filtering**: Automatically detects and blocks inappropriate language
 - **Age-Appropriate Responses**: System prompts ensure kid-friendly interactions  
-- **Safe AI Model**: Uses GPT-4o-mini with reduced temperature for consistent responses
 - **Dual-Layer Protection**: Input and output filtering for maximum safety
+- **Grown-up PIN (optional)**: Only a parent with the PIN can change a session's instructions
+- **Rate Limiting**: Each session can send a limited number of messages per minute
 
 ### Interactive Features
 - **Fun Interface**: Emojis and encouraging language throughout
+- **Streaming Replies**: Replies arrive sentence by sentence, already safety-checked
 - **Conversation Starters**: Built-in suggestions for fun topics
 - **Educational Focus**: Encourages learning, creativity, and positive values
 - **Custom Session Prompts**: Frontend can add educational context while maintaining safety
@@ -43,6 +45,14 @@ UPSTASH_REDIS_REST_TOKEN=your_upstash_redis_rest_token
 ALLOWED_ORIGINS=*
 ```
 
+Optional settings:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `PARENT_PIN` | not set | Turns on the [grown-up PIN](#grown-up-pin). Use 6 or more digits. |
+| `PARENT_SIGNING_SECRET` | derived from the PIN and `OPENAI_API_KEY` | Secret used to sign parent approvals. Set a long random string if you prefer not to derive it. |
+| `QUERY_RATE_LIMIT_PER_MINUTE` | `20` | Messages allowed per session per minute. `0` turns the limit off. |
+
 `UPSTASH_REDIS_REST_URL` and `UPSTASH_REDIS_REST_TOKEN` are required for durable sessions on Vercel. If they are not set, the app tries `UPSTASH2_KV_REST_API_URL`/`UPSTASH2_KV_REST_API_TOKEN`, then `KV_REST_API_URL`/`KV_REST_API_TOKEN`. If none are set, it uses in-memory sessions (fine for local/Docker/App Runner usage).
 
 ### 3. Run Application
@@ -62,6 +72,7 @@ This project now supports Vercel's native Python/FastAPI runtime.
    - `UPSTASH_REDIS_REST_TOKEN`
    - `ALLOWED_ORIGINS` (optional, comma-separated; defaults to `*`)
    - `CRON_SECRET` (any long random string; protects `/cron/keepalive`)
+   - `PARENT_PIN` (optional; see [Grown-up PIN](#grown-up-pin))
 4. Deploy with Vercel.
 
 The Vercel config targets the Singapore region (`sin1`) in `vercel.json` and schedules a daily keep-alive cron (see below). `pyproject.toml` points Vercel at the FastAPI app entrypoint (`main:app`) through `[project.scripts]`, pins Python 3.12, and mirrors the deployment dependencies.
@@ -99,6 +110,7 @@ docker run -p 8080:8080 \
 | GET | `/` | Health check and welcome message |
 | POST | `/initiate-session` | Create new chat session |
 | POST | `/query` | Send message (requires auth) |
+| POST | `/query/stream` | Send message, get the reply as a stream (requires auth) |
 | GET | `/session/{id}/history` | Get chat history (requires auth) |
 | DELETE | `/session` | End session (requires auth) |
 
@@ -114,8 +126,42 @@ docker run -p 8080:8080 \
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| POST | `/session/add-prompt` | Add custom session prompt (requires auth) |
+| POST | `/session/add-prompt` | Add custom session prompt (requires auth; also the grown-up PIN when enabled) |
 | GET | `/session/prompt-info` | Get session prompt details (requires auth) |
+| GET | `/parent/status` | Whether the grown-up PIN is enabled |
+| POST | `/parent/verify` | Check the PIN and get a 15-minute parent token |
+
+### Streaming Replies
+
+`POST /query/stream` takes the same body as `/query` and returns Server-Sent Events (`text/event-stream`):
+
+```
+event: delta
+data: {"text": "Octopuses have three hearts!"}
+
+event: delta
+data: {"text": " They also have blue blood."}
+
+event: done
+data: {"response": "Octopuses have three hearts! They also have blue blood. Cool, right?", "session_id": "...", "username": "emma"}
+```
+
+- `delta` events only ever contain **complete sentences that already passed the word filter**, so a child never sees a blocked word, even briefly.
+- If the filter catches something later in the reply, streaming stops and `done.response` holds the safe replacement message. Clients should always show `done.response` as the final reply.
+- The stream always ends with one `done` event, including when OpenAI fails.
+
+### Grown-up PIN
+
+Without `PARENT_PIN`, anyone holding a session ID (including the child's browser) can change that session's instructions with `/session/add-prompt`.
+
+With `PARENT_PIN` set:
+
+1. The frontend calls `GET /parent/status` → `{"pin_required": true}` and asks the grown-up for the PIN.
+2. `POST /parent/verify` with `{"pin": "..."}` returns `{"parent_token": "...", "expires_in": 900}`. A wrong PIN returns 401. After 5 wrong PINs from one address (or 30 in total) verification is locked for 15 minutes (429).
+3. `POST /session/add-prompt` with the header `X-Parent-Token: <parent_token>` saves the instructions and returns a `signature` for that exact text.
+4. To apply the same instructions to a later session without the PIN, send `{"additional_prompt": "<same text>", "signature": "<signature>"}`. Changed text is rejected with 403.
+
+Changing `PARENT_PIN` (or `PARENT_SIGNING_SECRET` / `OPENAI_API_KEY` when the secret is derived) invalidates earlier signatures, so grown-ups need to save their instructions again.
 
 ### Keep-alive Cron
 
@@ -189,9 +235,8 @@ When inappropriate content is detected:
 4. Log for monitoring
 
 ### AI Configuration
-- **Model**: GPT-4o-mini
-- **Temperature**: 0.5 (consistent responses)
-- **Max Tokens**: 300 (appropriate length)
+- **Model**: set by `OPENAI_MODEL` in `main.py`
+- **Max Completion Tokens**: 1000 (includes reasoning tokens; reply length is kept short by the system prompt)
 - **Moderation**: Dual-layer filtering
 
 ### AWS Secrets Manager Support
@@ -254,6 +299,8 @@ gpt-for-kids-backend/
 |-- pyproject.toml                  # Vercel Python runtime config
 |-- vercel.json                     # Vercel region and cron config
 |-- scripts/purge_redis_sessions.py # Redis session purge utility
+|-- tests/                          # pytest tests (fake OpenAI client)
+|-- requirements-dev.txt            # Test dependencies
 |-- Dockerfile                      # Legacy App Runner/container config
 |-- apprunner.yaml                  # Legacy App Runner config
 `-- README.md                       # Documentation
@@ -264,7 +311,11 @@ gpt-for-kids-backend/
 | Status Code | Description |
 |-------------|-------------|
 | 400 | Invalid input (empty username/message) |
-| 401 | Invalid or missing session ID |
+| 401 | Invalid or missing session ID, or wrong grown-up PIN |
+| 403 | Instructions change without grown-up approval (PIN enabled) |
+| 404 | `/parent/verify` when no PIN is configured |
+| 422 | Request too large (username over 50, message or instructions over 2000 characters) |
+| 429 | Too many messages for this session, or too many wrong PINs |
 | 500 | OpenAI API or server errors |
 
 ## Security
@@ -274,8 +325,17 @@ gpt-for-kids-backend/
 - **Errors**: Client error messages are generic; exception details stay in server logs
 - **Cron**: `/cron/keepalive` is protected by `CRON_SECRET`
 
-**TODO**: :
-   - Implementing rate limiting
+- **Rate limits**: per-session message limit and PIN lockout use Redis when available, so they are shared by all instances; in memory mode they apply per instance
+- **Grown-up PIN**: compared in constant time; parent tokens and approved instructions are HMAC-signed
+
+## Tests
+
+```bash
+pip install -r requirements.txt -r requirements-dev.txt
+python -m pytest
+```
+
+The tests use a fake OpenAI client and in-memory sessions, so they need no API key or network. GitHub Actions runs them on every push and pull request.
 
 ## License
 
