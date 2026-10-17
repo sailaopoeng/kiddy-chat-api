@@ -538,12 +538,12 @@ async def query(request: QueryRequest, session_id: str = Depends(validate_sessio
         logger.info(f"Sending request to OpenAI for user {username}")
         # Create OpenAI chat completion with kid-friendly model
         response = client.chat.completions.create(
-            model="gpt-5.4-mini",
+            model="gpt-5.6-luna",
             messages=session_data["messages"],
-            max_tokens=300,  # Reduced for kid-appropriate responses
-            temperature=0.5,  # Lower temperature for more consistent, safer responses
-            frequency_penalty=0.3,
-            presence_penalty=0.3
+            # GPT-5.x models reject max_tokens/temperature/penalties.
+            # Budget includes hidden reasoning tokens, so keep it generous;
+            # reply length is kept short by the system prompt.
+            max_completion_tokens=1000,
         )
         
         # Extract assistant response
