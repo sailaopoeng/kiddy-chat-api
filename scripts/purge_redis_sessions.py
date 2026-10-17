@@ -9,6 +9,21 @@ SESSION_INDEX_KEY = "sessions:index"
 SESSION_KEY_PATTERN = "session:*"
 DELETE_BATCH_SIZE = 100
 
+# Same order as main.py.
+REDIS_ENV_PAIRS = [
+    ("UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"),
+    ("UPSTASH2_KV_REST_API_URL", "UPSTASH2_KV_REST_API_TOKEN"),
+    ("KV_REST_API_URL", "KV_REST_API_TOKEN"),
+]
+
+
+def resolve_redis_config():
+    for url_var, token_var in REDIS_ENV_PAIRS:
+        url, token = os.getenv(url_var), os.getenv(token_var)
+        if url and token:
+            return url, token
+    return None
+
 
 def scan_session_keys(redis: Redis) -> List[str]:
     cursor = 0
@@ -33,15 +48,14 @@ def main() -> int:
     )
     args = parser.parse_args()
 
-    if not os.getenv("UPSTASH_REDIS_REST_URL") or not os.getenv("UPSTASH_REDIS_REST_TOKEN"):
-        print("Missing UPSTASH_REDIS_REST_URL or UPSTASH_REDIS_REST_TOKEN.", file=sys.stderr)
+    config = resolve_redis_config()
+    if not config:
+        names = ", ".join(f"{url}/{token}" for url, token in REDIS_ENV_PAIRS)
+        print(f"Missing Redis config. Set one of: {names}.", file=sys.stderr)
         return 1
 
-    redis = Redis(
-        url=os.getenv("UPSTASH_REDIS_REST_URL"),
-        token=os.getenv("UPSTASH_REDIS_REST_TOKEN"),
-        allow_telemetry=False,
-    )
+    url, token = config
+    redis = Redis(url=url, token=token, allow_telemetry=False)
     keys = scan_session_keys(redis)
 
     print(f"Found {len(keys)} session keys and index key '{SESSION_INDEX_KEY}'.")
