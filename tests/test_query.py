@@ -130,3 +130,20 @@ def test_safe_stream_boundary():
     assert main.safe_stream_boundary("One. Two") == len("One.")
     assert main.safe_stream_boundary("Pi is 3.14") == 0
     assert main.safe_stream_boundary("Line one\nLine two") == len("Line one\n")
+
+
+def test_broken_characters_get_a_clean_error(api):
+    # Half an emoji (a lone surrogate) used to crash the error response with a
+    # 500 that had no CORS headers, which browsers report as a network error.
+    session_id = start_session(api)
+    body = '{"message": "Favorite animal? \\udc3e"}'
+    headers = {
+        **auth(session_id),
+        "Content-Type": "application/json",
+        "Origin": "https://kiddy-chat-client.example",
+    }
+    for path in ("/query", "/query/stream"):
+        response = api.post(path, content=body, headers=headers)
+        assert response.status_code == 422
+        assert response.headers["access-control-allow-origin"] == "*"
+        assert response.json()["detail"][0]["loc"] == ["body", "message"]
