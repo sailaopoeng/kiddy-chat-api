@@ -12,7 +12,8 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, Optional, List
 
 from fastapi import FastAPI, HTTPException, Depends, Header, Request, status
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.openapi.docs import get_redoc_html
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -149,6 +150,24 @@ app.add_middleware(
     allow_methods=["*"],  # Allows all methods (GET, POST, PUT, DELETE, etc.)
     allow_headers=["*"],  # Allows all headers
 )
+
+@app.exception_handler(RequestValidationError)
+async def request_validation_error_handler(request: Request, exc: RequestValidationError):
+    """
+    Like FastAPI's default 422 response, but without echoing the rejected input.
+    Input with broken characters (such as half an emoji) can't be encoded as
+    UTF-8, so echoing it crashed the request with a 500 that had no CORS
+    headers, which browsers report as a network error.
+    """
+    errors = [
+        {"type": error.get("type"), "loc": list(error.get("loc", ())), "msg": error.get("msg")}
+        for error in exc.errors()
+    ]
+    return Response(
+        content=json.dumps({"detail": errors}, ensure_ascii=True, default=str),
+        status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+        media_type="application/json",
+    )
 
 @app.on_event("startup")
 async def startup_event():
